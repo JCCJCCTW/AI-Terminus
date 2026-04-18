@@ -1279,6 +1279,22 @@ final class MentionTextView: NSTextView {
     var moveMentionSelectionUpHandler: (() -> Bool)?
     var moveMentionSelectionDownHandler: (() -> Bool)?
 
+    override func mouseDown(with event: NSEvent) {
+        if let window {
+            _ = window.makeFirstResponder(self)
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted {
+            needsDisplay = true
+            displayIfNeeded()
+        }
+        return accepted
+    }
+
     override func keyDown(with event: NSEvent) {
         if hasActiveMarkedText {
             super.keyDown(with: event)
