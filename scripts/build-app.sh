@@ -2,9 +2,12 @@
 # Builds AI Terminus as a distributable macOS .app bundle.
 #
 # Usage:
-#   ./scripts/build-app.sh              # universal (arm64 + x86_64)
+#   ./scripts/build-app.sh              # native arch (auto-detect: arm64 on Apple Silicon)
 #   ./scripts/build-app.sh arm64        # Apple Silicon only
 #   ./scripts/build-app.sh x86_64       # Intel only
+#   ./scripts/build-app.sh universal    # arm64 + x86_64 (requires xcodebuild Metal Toolchain;
+#                                       # broken on Xcode 26 — use native unless you really
+#                                       # need Intel compatibility)
 #
 # Output: dist/AI Terminus.app
 set -euo pipefail
@@ -14,7 +17,7 @@ cd "$(dirname "$0")/.."
 APP_NAME="AI Terminus"
 EXE_NAME="AITerminus"
 BUNDLE_ID="com.joechou.AITerminus"
-ARCH="${1:-universal}"
+ARCH="${1:-native}"
 
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
@@ -24,10 +27,13 @@ RES_DIR="$CONTENTS/Resources"
 
 echo "▶ Cleaning previous build..."
 rm -rf "$APP"
-mkdir -p "$MACOS_DIR" "$RES_DIR"
 
 echo "▶ Building ($ARCH) in release mode..."
 case "$ARCH" in
+  native)
+    swift build -c release
+    BIN="$(swift build -c release --show-bin-path)/$EXE_NAME"
+    ;;
   universal)
     swift build -c release --arch arm64 --arch x86_64
     BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/$EXE_NAME"
@@ -41,10 +47,13 @@ case "$ARCH" in
     BIN="$(swift build -c release --arch x86_64 --show-bin-path)/$EXE_NAME"
     ;;
   *)
-    echo "Unknown arch: $ARCH (use universal | arm64 | x86_64)" >&2
+    echo "Unknown arch: $ARCH (use native | universal | arm64 | x86_64)" >&2
     exit 1
     ;;
 esac
+
+# Now that build succeeded, create the .app skeleton.
+mkdir -p "$MACOS_DIR" "$RES_DIR"
 
 if [[ ! -f "$BIN" ]]; then
   echo "✗ Build failed — binary not found at $BIN" >&2

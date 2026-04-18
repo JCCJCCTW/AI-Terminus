@@ -38,13 +38,15 @@ open Package.swift
 open "dist/AI Terminus.app"
 ```
 
-指定架構：
+預設會用你目前機器的原生架構編譯。指定其他架構：
 
 ```bash
-./scripts/build-app.sh arm64      # Apple Silicon
+./scripts/build-app.sh arm64      # Apple Silicon 明確指定
 ./scripts/build-app.sh x86_64     # Intel
-./scripts/build-app.sh            # universal
+./scripts/build-app.sh universal  # arm64 + x86_64（Xcode 26 需要另外下載 Metal Toolchain）
 ```
+
+> **注意**：Xcode 26 的 `xcodebuild` 多架構路徑目前對新下載的 Metal Toolchain 會辨識失敗（SwiftTerm 內含 `.metal` shader），所以預設走單一架構的 `swift build`。要打 universal 請先執行 `xcodebuild -downloadComponent MetalToolchain` 並確認 `xcrun -f metal` 找得到工具。
 
 要安裝到 `/Applications`：
 
