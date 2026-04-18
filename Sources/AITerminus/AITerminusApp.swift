@@ -90,6 +90,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private static func isEditingTextInResponderChain(of window: NSWindow) -> Bool {
         var responder: NSResponder? = window.firstResponder
         while let current = responder {
+            if current is MentionTextView { return true }
             if let tv = current as? NSTextView, tv.isEditable { return true }
             if let tf = current as? NSTextField, tf.isEditable { return true }
             responder = current.nextResponder

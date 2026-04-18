@@ -123,27 +123,38 @@ struct HostListView: View {
             Divider()
             HStack {
                 Spacer(minLength: 0)
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Toggle(isOn: $appState.isSessionDragModeEnabled) {
                         Text(appState.t("開啟拖曳", "Enable Dragging"))
                             .font(.system(size: 12, weight: .medium))
                     }
                     .toggleStyle(.switch)
-                    .fixedSize()
+                    .labelsHidden()
 
-                    Image(systemName: "questionmark.circle")
-                        .font(.system(size: 12))
+                    Text(appState.t("開啟拖曳", "Enable Dragging"))
+                        .font(.system(size: 12, weight: .medium))
+
+                    Image(systemName: "questionmark.circle.fill")
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
+                        .padding(4)
+                        .contentShape(Circle())
                         .onHover { isHovering in
                             isShowingDragModeHelp = isHovering
                         }
                         .popover(isPresented: $isShowingDragModeHelp, arrowEdge: .top) {
-                            Text(appState.t("開啟後停用 Session 一般操作，僅保留拖曳重排。", "Disable normal session interactions and only allow drag-to-reorder."))
-                                .font(.system(size: 12))
-                                .padding(10)
-                                .frame(width: 220, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(appState.t("拖曳模式說明", "Dragging Mode"))
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text(appState.t("開啟後停用 Session 一般操作，僅保留拖曳重排。", "Disable normal session interactions and only allow drag-to-reorder."))
+                                    .font(.system(size: 12))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(10)
+                            .frame(width: 230, alignment: .leading)
                         }
                 }
+                .fixedSize()
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)

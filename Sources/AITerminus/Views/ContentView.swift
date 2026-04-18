@@ -19,9 +19,21 @@ struct ContentView: View {
             SessionGridView()
                 .frame(minWidth: 400)
                 .overlay {
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(appState.isSessionDragModeEnabled ? Color.red.opacity(0.85) : Color.clear, lineWidth: 3)
-                        .padding(4)
+                    if appState.isSessionDragModeEnabled {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.red.opacity(0.9), lineWidth: 4)
+                            .padding(4)
+                            .overlay(alignment: .top) {
+                                Text(appState.t("拖曳模式", "Dragging Mode"))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.red)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(.regularMaterial)
+                                    .clipShape(Capsule())
+                                    .padding(.top, 6)
+                            }
+                    }
                 }
 
             // Right: AI assistant panel

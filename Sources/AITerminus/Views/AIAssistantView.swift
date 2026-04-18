@@ -1087,6 +1087,9 @@ struct SessionMentionTextEditor: NSViewRepresentable {
 
         let textView = MentionTextView()
         textView.delegate = context.coordinator
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = true
         textView.isRichText = false
         textView.importsGraphics = false
         textView.drawsBackground = false
