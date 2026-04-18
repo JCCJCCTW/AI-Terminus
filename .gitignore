@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+xcuserdata/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
+# Build artifacts
+build/
+dist/
+*.app
+
+# Secrets
+*.env
+secrets.json
