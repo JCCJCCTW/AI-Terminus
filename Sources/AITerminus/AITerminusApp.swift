@@ -36,24 +36,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private static func routeKeyEvent(_ event: NSEvent) -> NSEvent? {
         guard let window = NSApp.keyWindow else { return event }
 
-        // NSTextView as first responder = SwiftUI TextField (search, AI input, etc.)
-        // Let those handle their own events normally.
-        if window.firstResponder is NSTextView { return event }
+        // If any editable text view is anywhere in the responder chain, leave
+        // the event alone. SwiftUI TextField's field editor (NSTextView) is
+        // sometimes wrapped in additional responders, so a direct `is NSTextView`
+        // check on the first responder can miss it.
+        if isEditingTextInResponderChain(of: window) { return event }
 
         // Find the focused terminal (must be in this window / currently visible).
         guard let tv = AppState.shared.focusedSession?.terminalView,
               tv.window === window
         else { return event }
 
-        // Ensure the terminal is the AppKit first responder.
-        // Once it is, AppKit's normal responder chain delivers:
-        //   performKeyEquivalent → first responder (terminal handles ⌘C etc.)
-        //   keyDown → first responder → interpretKeyEvents → insertText → PTY
-        // This correctly bypasses SwiftUI stealing focus while still allowing
-        // ⌘Q / ⌘W / system shortcuts to propagate up the chain normally.
-        if window.firstResponder !== tv {
-            window.makeFirstResponder(tv)
-        }
+        // Only handle events when the terminal is already the first responder.
+        // Focus transitions to the terminal happen through explicit user action
+        // (clicking the terminal, switching session, opening a new session);
+        // we never steal focus here — that would break SwiftUI controls.
+        guard window.firstResponder === tv else { return event }
 
         // Route plain Return/Enter directly to the terminal and swallow the event.
         // This prevents SwiftUI/AppKit focus navigation from treating Enter as a
@@ -68,8 +66,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Return the event unchanged — AppKit delivers it to the (now correct) first responder.
+        // Terminal owns focus — AppKit will deliver the event to it normally.
         return event
+    }
+
+    @MainActor
+    private static func isEditingTextInResponderChain(of window: NSWindow) -> Bool {
+        var responder: NSResponder? = window.firstResponder
+        while let current = responder {
+            if let tv = current as? NSTextView, tv.isEditable { return true }
+            if let tf = current as? NSTextField, tf.isEditable { return true }
+            responder = current.nextResponder
+        }
+        return false
     }
 }
 

@@ -64,6 +64,9 @@ echo "▶ Assembling .app bundle..."
 cp "$BIN" "$MACOS_DIR/$EXE_NAME"
 chmod +x "$MACOS_DIR/$EXE_NAME"
 cp Resources/Info.plist "$CONTENTS/Info.plist"
+if [[ -f Resources/AppIcon.icns ]]; then
+  cp Resources/AppIcon.icns "$RES_DIR/AppIcon.icns"
+fi
 
 # Ad-hoc code signing so Gatekeeper's translocation doesn't mangle relative paths.
 echo "▶ Ad-hoc signing..."

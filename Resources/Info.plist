@@ -8,6 +8,10 @@
     <string>AI Terminus</string>
     <key>CFBundleExecutable</key>
     <string>AITerminus</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.joechou.AITerminus</string>
     <key>CFBundleInfoDictionaryVersion</key>
