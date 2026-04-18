@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftTerm
 @preconcurrency import AppKit
 
 extension NSEvent: @retroactive @unchecked Sendable {}
@@ -36,11 +37,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private static func routeKeyEvent(_ event: NSEvent) -> NSEvent? {
         guard let window = NSApp.keyWindow else { return event }
 
+        if AppState.shared.isSessionDragModeEnabled {
+            if event.type == .keyDown,
+               event.charactersIgnoringModifiers?.isEmpty == false,
+               !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
+                AppState.shared.showDragModeKeyboardAlert = true
+            }
+            return nil
+        }
+
         // If any editable text view is anywhere in the responder chain, leave
         // the event alone. SwiftUI TextField's field editor (NSTextView) is
         // sometimes wrapped in additional responders, so a direct `is NSTextView`
         // check on the first responder can miss it.
         if isEditingTextInResponderChain(of: window) { return event }
+
+        if event.type == .keyDown,
+           hasPlainCommandModifier(event),
+           handleSessionNavigationShortcut(event) {
+            return nil
+        }
 
         // Find the focused terminal (must be in this window / currently visible).
         guard let tv = AppState.shared.focusedSession?.terminalView,
@@ -79,6 +95,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             responder = current.nextResponder
         }
         return false
+    }
+
+    private static func hasPlainCommandModifier(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        return flags.contains(.command) && flags.isDisjoint(with: [.control, .option, .shift])
+    }
+
+    @MainActor
+    private static func handleSessionNavigationShortcut(_ event: NSEvent) -> Bool {
+        let direction: AppState.SessionFocusDirection
+        switch event.keyCode {
+        case 123:
+            direction = .left
+        case 124:
+            direction = .right
+        case 125:
+            direction = .down
+        case 126:
+            direction = .up
+        default:
+            return false
+        }
+
+        AppState.shared.moveFocusedSession(direction)
+        return true
     }
 }
 

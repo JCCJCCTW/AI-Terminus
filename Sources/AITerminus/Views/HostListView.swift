@@ -12,6 +12,7 @@ struct HostListView: View {
     @State private var pendingDeleteHost: SSHHost?
     @State private var selectedRowId: String?
     @State private var expandedGroups: Set<String> = ["全部"]
+    @State private var isShowingDragModeHelp = false
 
     // Filtered host list
     var filteredHosts: [SSHHost] {
@@ -120,6 +121,34 @@ struct HostListView: View {
                 Spacer(minLength: 0)
             }
             Divider()
+            HStack {
+                Spacer(minLength: 0)
+                HStack(spacing: 6) {
+                    Toggle(isOn: $appState.isSessionDragModeEnabled) {
+                        Text(appState.t("開啟拖曳", "Enable Dragging"))
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .toggleStyle(.switch)
+                    .fixedSize()
+
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .onHover { isHovering in
+                            isShowingDragModeHelp = isHovering
+                        }
+                        .popover(isPresented: $isShowingDragModeHelp, arrowEdge: .top) {
+                            Text(appState.t("開啟後停用 Session 一般操作，僅保留拖曳重排。", "Disable normal session interactions and only allow drag-to-reorder."))
+                                .font(.system(size: 12))
+                                .padding(10)
+                                .frame(width: 220, alignment: .leading)
+                        }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
             Button {
                 appState.showAISettingsSheet = true
             } label: {

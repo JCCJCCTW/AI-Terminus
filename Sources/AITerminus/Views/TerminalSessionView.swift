@@ -3,6 +3,8 @@ import SwiftTerm
 import AppKit
 import UniformTypeIdentifiers
 
+private let sessionDragPayloadPrefix = "aiterminus-session:"
+
 final class SessionTerminalView: LocalProcessTerminalView {
     weak var session: SSHSession?
 
@@ -25,7 +27,7 @@ final class SessionTerminalView: LocalProcessTerminalView {
 // at zero size because 0/0 is undefined).
 class TerminalViewContainer: NSView {
     private(set) var terminalView: LocalProcessTerminalView?
-    var onFocused: (() -> Void)?
+    var sessionID: UUID?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -37,16 +39,28 @@ class TerminalViewContainer: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
     override func mouseDown(with event: NSEvent) {
-        onFocused?()
-        if let tv = terminalView {
-            if tv.window === window {
-                window?.makeFirstResponder(tv)
-            }
-            tv.mouseDown(with: event)
-            return
+        focusAndForward(event) { tv, forwardedEvent in
+            tv.mouseDown(with: forwardedEvent)
         }
-        super.mouseDown(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        focusAndForward(event) { tv, forwardedEvent in
+            tv.rightMouseDown(with: forwardedEvent)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        terminalView?.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        terminalView?.mouseUp(with: event)
     }
 
     // Called whenever the container is resized — keeps the terminal filling bounds.
@@ -75,16 +89,32 @@ class TerminalViewContainer: NSView {
         tv.autoresizingMask = [.width, .height]
         addSubview(tv)
         refreshTerminalLayout()
-        // Give the terminal keyboard focus once it's on screen.
-        DispatchQueue.main.async { [weak self, weak tv] in
-            guard let self, let tv, tv.window === self.window, let window = self.window else { return }
-            window.makeFirstResponder(tv)
+    }
+
+    func focusTerminalIfNeeded(for sessionID: UUID, token: UInt64) {
+        guard AppState.shared.focusedSessionId == sessionID,
+              AppState.shared.focusedSessionChangeToken == token
+        else { return }
+        guard let tv = terminalView, tv.window === window, let window else { return }
+        if window.firstResponder !== tv {
+            _ = window.makeFirstResponder(nil)
+            _ = window.makeFirstResponder(tv)
         }
     }
 
-    func focusTerminal() {
-        guard let tv = terminalView, tv.window === window else { return }
-        window?.makeFirstResponder(tv)
+    private func focusAndForward(
+        _ event: NSEvent,
+        using handler: (LocalProcessTerminalView, NSEvent) -> Void
+    ) {
+        if let sessionID, AppState.shared.focusedSessionId != sessionID {
+            AppState.shared.focusedSessionId = sessionID
+        }
+        guard let tv = terminalView, tv.window === window, let window else { return }
+        if window.firstResponder !== tv {
+            _ = window.makeFirstResponder(nil)
+            _ = window.makeFirstResponder(tv)
+        }
+        handler(tv, event)
     }
 
     private func refreshTerminalLayout() {
@@ -117,13 +147,14 @@ class TerminalViewContainer: NSView {
 struct TerminalSessionView: NSViewRepresentable {
     @ObservedObject var session: SSHSession
     var isFocused: Bool = false
+    var focusToken: UInt64 = 0
     var onFocused: (() -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session) }
 
     func makeNSView(context: Context) -> TerminalViewContainer {
         if let existingContainer = session.terminalContainer {
-            existingContainer.onFocused = onFocused
+            existingContainer.sessionID = session.id
             if let terminalView = session.terminalView, existingContainer.terminalView !== terminalView {
                 existingContainer.attach(terminalView)
             }
@@ -131,7 +162,7 @@ struct TerminalSessionView: NSViewRepresentable {
         }
 
         let container = TerminalViewContainer(frame: .zero)
-        container.onFocused = onFocused
+        container.sessionID = session.id
 
         if let existing = session.terminalView {
             container.attach(existing)
@@ -157,7 +188,12 @@ struct TerminalSessionView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TerminalViewContainer, context: Context) {
-        nsView.onFocused = onFocused
+        nsView.sessionID = session.id
+        MainActor.assumeIsolated {
+            if session.terminalContainer !== nsView {
+                session.terminalContainer = nsView
+            }
+        }
         if let tv = session.terminalView, nsView.terminalView !== tv {
             nsView.attach(tv)
         } else {
@@ -165,12 +201,16 @@ struct TerminalSessionView: NSViewRepresentable {
             nsView.layoutSubtreeIfNeeded()
         }
         // When this session becomes focused, give the terminal keyboard focus.
-        if isFocused, !context.coordinator.wasFocused {
+        if isFocused, context.coordinator.lastFocusToken != focusToken {
+            let sessionID = session.id
+            let focusToken = focusToken
+            context.coordinator.lastFocusToken = focusToken
             DispatchQueue.main.async {
-                nsView.focusTerminal()
+                nsView.focusTerminalIfNeeded(for: sessionID, token: focusToken)
             }
+        } else if !isFocused {
+            context.coordinator.lastFocusToken = 0
         }
-        context.coordinator.wasFocused = isFocused
     }
 
     private func makeTerminalView(coordinator: Coordinator) -> LocalProcessTerminalView {
@@ -194,7 +234,7 @@ struct TerminalSessionView: NSViewRepresentable {
 
     class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         weak var session: SSHSession?
-        var wasFocused = false
+        var lastFocusToken: UInt64 = 0
         init(session: SSHSession) { self.session = session }
 
         func processTerminated(source: TerminalView, exitCode: Int32?) {
@@ -218,7 +258,7 @@ struct SessionCell: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header — SwiftUI tap gesture only here
+            // Header
             HStack(spacing: 6) {
                 Circle()
                     .fill(session.status.color)
@@ -226,6 +266,14 @@ struct SessionCell: View {
                 Text("S\(sessionNumber)")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(SwiftUI.Color.gray.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .help(appState.t("拖曳可重新排序", "Drag to reorder"))
+                    .onDrag {
+                        dragProvider()
+                    }
                 Text(session.host.displayTitle)
                     .font(.system(size: 11, weight: .medium)).lineLimit(1)
                 Text(session.host.connectionLabel)
@@ -239,31 +287,66 @@ struct SessionCell: View {
             .padding(.horizontal, 8).padding(.vertical, 4)
             .background(headerBackgroundColor)
             .contentShape(Rectangle())
-            .onTapGesture { appState.focusedSessionId = session.id }
-            .onDrag {
+            .onTapGesture {
+                guard !appState.isSessionDragModeEnabled else { return }
                 if appState.focusedSessionId != session.id {
                     appState.focusedSessionId = session.id
                 }
-                return NSItemProvider(object: session.id.uuidString as NSString)
             }
 
-            // Terminal — no SwiftUI gesture; AppKit handles clicks via TerminalViewContainer.mouseDown
-            TerminalSessionView(session: session, isFocused: isFocused) {
-                appState.focusedSessionId = session.id
+            // Terminal — selection follows the terminal becoming first responder.
+            TerminalSessionView(
+                session: session,
+                isFocused: isFocused,
+                focusToken: appState.focusedSessionChangeToken
+            ) {
+                guard !appState.isSessionDragModeEnabled else { return }
+                if appState.focusedSessionId != session.id {
+                    appState.focusedSessionId = session.id
+                }
             }
+            .id(session.id)
+            .allowsHitTesting(!appState.isSessionDragModeEnabled)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .allowsHitTesting(!appState.isSessionDragModeEnabled)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture { appState.focusedSessionId = session.id }
-        .onDrop(of: [UTType.text.identifier], isTargeted: $isDropTarget) { providers in
+        .onDrop(of: [UTType.plainText.identifier], isTargeted: $isDropTarget) { providers in
             handleDrop(providers)
         }
+        .contextMenu {
+            Button(appState.t("往前移", "Move Earlier")) { appState.moveSession(session, offset: -1) }
+                .disabled(!appState.canMoveSession(session, offset: -1))
+            Button(appState.t("往後移", "Move Later")) { appState.moveSession(session, offset: 1) }
+                .disabled(!appState.canMoveSession(session, offset: 1))
+            Divider()
+            Button(appState.t("關閉此 Session", "Close This Session")) { appState.closeSession(session) }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            if appState.isSessionDragModeEnabled {
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .onDrag {
+                        dragProvider()
+                    }
+                    .onDrop(of: [UTType.plainText.identifier], isTargeted: $isDropTarget) { providers in
+                        handleDrop(providers)
+                    }
+            }
+        }
         .overlay(
             RoundedRectangle(cornerRadius: 6)
                 .stroke(dropBorderColor, lineWidth: isDropTarget ? 3 : (isFocused ? 2 : 1))
         )
+    }
+
+    private func dragProvider() -> NSItemProvider {
+        if appState.focusedSessionId != session.id {
+            appState.focusedSessionId = session.id
+        }
+        return NSItemProvider(object: "\(sessionDragPayloadPrefix)\(session.id.uuidString)" as NSString)
     }
 
     private var headerBackgroundColor: SwiftUI.Color {
@@ -278,17 +361,21 @@ struct SessionCell: View {
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.text.identifier) }) else {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }) else {
             return false
         }
 
         provider.loadObject(ofClass: NSString.self) { object, _ in
             guard let rawString = object as? NSString else { return }
             let rawValue = String(rawString).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let sessionID = UUID(uuidString: rawValue) else { return }
+            guard rawValue.hasPrefix(sessionDragPayloadPrefix) else { return }
+            let sessionIDString = String(rawValue.dropFirst(sessionDragPayloadPrefix.count))
+            guard let sessionID = UUID(uuidString: sessionIDString) else { return }
 
             Task { @MainActor in
-                guard let sourceSession = appState.sessions.first(where: { $0.id == sessionID }) else { return }
+                guard sessionID != session.id,
+                      let sourceSession = appState.sessions.first(where: { $0.id == sessionID })
+                else { return }
                 appState.moveSession(sourceSession, to: session)
                 appState.focusedSessionId = sourceSession.id
             }

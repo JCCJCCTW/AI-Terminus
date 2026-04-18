@@ -69,6 +69,7 @@ struct SessionGridView: View {
                                     isFocused: appState.focusedSessionId == session.id,
                                     sessionNumber: sessionNumber
                                 )
+                                .id(session.id)
                             } else if useGrid {
                                 EmptySessionCell()
                             } else {

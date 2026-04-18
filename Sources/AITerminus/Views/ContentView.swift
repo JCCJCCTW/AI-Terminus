@@ -18,6 +18,11 @@ struct ContentView: View {
             // Center: session grid + tab bar
             SessionGridView()
                 .frame(minWidth: 400)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(appState.isSessionDragModeEnabled ? Color.red.opacity(0.85) : Color.clear, lineWidth: 3)
+                        .padding(4)
+                }
 
             // Right: AI assistant panel
             if appState.showAIPanel {
@@ -71,6 +76,11 @@ struct ContentView: View {
                 draftAIConfig = appState.aiConfig
                 draftLanguage = appState.language
             }
+        }
+        .alert(appState.t("提醒", "Notice"), isPresented: $appState.showDragModeKeyboardAlert) {
+            Button(appState.t("確定", "OK"), role: .cancel) {}
+        } message: {
+            Text(appState.t("請關閉連線拖曳", "Please disable session dragging first."))
         }
     }
 }
