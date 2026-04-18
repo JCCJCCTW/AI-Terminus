@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build .app (arm64)
+        run: ./scripts/build-app.sh arm64
+
+      - name: Package arm64 zip
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "AI Terminus.app" "AI-Terminus-${{ steps.tag.outputs.name }}-arm64.zip"
+          shasum -a 256 "AI-Terminus-${{ steps.tag.outputs.name }}-arm64.zip" > "AI-Terminus-${{ steps.tag.outputs.name }}-arm64.zip.sha256"
+
+      - name: Rebuild .app (x86_64)
+        run: ./scripts/build-app.sh x86_64
+
+      - name: Package x86_64 zip
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "AI Terminus.app" "AI-Terminus-${{ steps.tag.outputs.name }}-x86_64.zip"
+          shasum -a 256 "AI-Terminus-${{ steps.tag.outputs.name }}-x86_64.zip" > "AI-Terminus-${{ steps.tag.outputs.name }}-x86_64.zip.sha256"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            dist/AI-Terminus-${{ steps.tag.outputs.name }}-arm64.zip
+            dist/AI-Terminus-${{ steps.tag.outputs.name }}-arm64.zip.sha256
+            dist/AI-Terminus-${{ steps.tag.outputs.name }}-x86_64.zip
+            dist/AI-Terminus-${{ steps.tag.outputs.name }}-x86_64.zip.sha256
+          body: |
+            ## 安裝方式
+
+            1. 下載對應架構的 zip（Apple Silicon 請選 `arm64`，Intel Mac 請選 `x86_64`）
+            2. 解壓縮後拖曳 `AI Terminus.app` 到 `/Applications`
+            3. 首次開啟會被 Gatekeeper 擋下（因為是 ad-hoc 簽章），請在 Finder 右鍵 → 開啟 放行一次
+
+            ## 校驗
+
+            每個 zip 都附 `.sha256`。驗證：
+
+            ```bash
+            shasum -a 256 -c AI-Terminus-${{ steps.tag.outputs.name }}-arm64.zip.sha256
+            ```

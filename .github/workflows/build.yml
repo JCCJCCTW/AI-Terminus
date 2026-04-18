@@ -1,0 +1,42 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build .app (${{ matrix.arch }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build .app
+        run: ./scripts/build-app.sh ${{ matrix.arch }}
+
+      - name: Verify binary
+        run: |
+          file "dist/AI Terminus.app/Contents/MacOS/AITerminus"
+          codesign -dv "dist/AI Terminus.app" 2>&1 || true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Terminus-${{ matrix.arch }}
+          path: dist/AI Terminus.app
+          if-no-files-found: error

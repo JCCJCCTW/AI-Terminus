@@ -74,6 +74,60 @@ API Key 儲存在本機 `UserDefaults`，不上傳任何地方。
 - **NSEvent local monitor** — 繞過 SwiftUI `NSHostingView` 攔截，將鍵盤事件正確路由到終端機
 - **Session 生命週期** — `SSHSession` 強參考 `LocalProcessTerminalView`，確保分頁切換時 SSH 連線不中斷
 
+## 目前主要功能說明
+
+### 1. SSH 主機管理
+
+- 新增、編輯、刪除、複製 SSH 主機
+- 支援名稱、主機位址、連接埠、使用者名稱、群組、備註
+- 支援密碼與私鑰兩種認證方式
+- 可從檔案選擇 SSH 私鑰路徑
+- 主機可依群組整理、折疊與搜尋
+
+### 2. 多 Session 終端機
+
+- 可同時開啟多個 SSH Session
+- Session 版面會依數量自動切換
+- 支援拖曳調整 Session 順序
+- 支援 Session 分頁切換
+- 切頁或切換版面時，既有 SSH 連線會持續保留
+
+### 3. 原生終端機操作
+
+- 使用 SwiftTerm 顯示與輸入終端內容
+- 鍵盤事件會路由到目前聚焦的 terminal
+- 支援一般 shell 操作、方向鍵與 Ctrl 類控制鍵
+- 點擊 terminal 即可切換對應 Session 焦點
+
+### 4. AI 助理面板
+
+- 支援 Anthropic / Claude、OpenAI / ChatGPT、Google Gemini、Ollama
+- 可選擇目前要分析或控制的 Session
+- 可根據 Session transcript 提供分析、建議與指令說明
+- 明確指定控制指令時，可直接送命令或控制鍵到 Session
+- AI 子系統錯誤時可隔離並重新載入，不影響 SSH Session
+
+### 5. AI 輸入輔助
+
+- 支援 Session mention
+- 支援 slash command
+- 支援輸入補全
+- 區分分析模式與實際操作模式
+
+### 6. 設定與語言
+
+- 可設定 AI Provider、API Key、模型名稱或本機服務位址
+- 支援繁體中文與 English
+- 語言切換需按下儲存後才會正式套用
+
+### 7. macOS 整合
+
+- 提供選單列指令與快捷鍵
+- 支援顯示 / 隱藏 AI 面板
+- 支援上一頁 / 下一頁 Session 分頁
+- 支援關閉目前 Session
+- 可打包成 macOS `.app` 執行
+
 ## 授權
 
 MIT
