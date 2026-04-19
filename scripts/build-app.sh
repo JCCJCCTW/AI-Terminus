@@ -23,13 +23,14 @@ MACOS_DIR="$CONTENTS/MacOS"
 RESOURCES_DIR="$CONTENTS/Resources"
 FRAMEWORKS_DIR="$CONTENTS/Frameworks"
 BUILD_ROOT="$PWD/.build"
-DERIVED_DATA="$(mktemp -d "$BUILD_ROOT/xcodebuild.XXXXXX")"
-PRODUCTS_DIR="$DERIVED_DATA/Build/Products/Release"
-BIN="$PRODUCTS_DIR/$EXE_NAME"
 
 echo "▶ Cleaning previous build..."
 rm -rf "$APP"
 mkdir -p "$BUILD_ROOT"
+
+DERIVED_DATA="$(mktemp -d "$BUILD_ROOT/xcodebuild.XXXXXX")"
+PRODUCTS_DIR="$DERIVED_DATA/Build/Products/Release"
+BIN="$PRODUCTS_DIR/$EXE_NAME"
 trap 'rm -rf "$DERIVED_DATA"' EXIT
 
 echo "▶ Building ($ARCH) with xcodebuild Release..."
