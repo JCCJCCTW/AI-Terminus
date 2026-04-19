@@ -12,8 +12,6 @@ struct ContentView: View {
             // Left: host list sidebar
             HostListView()
                 .frame(minWidth: 200, idealWidth: 220, maxWidth: 300)
-                .contentShape(Rectangle())
-                .onTapGesture { appState.focusedSessionId = nil }
 
             // Center: session grid + tab bar
             SessionGridView()

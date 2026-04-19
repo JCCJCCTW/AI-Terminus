@@ -164,6 +164,11 @@ class SSHSession: ObservableObject, Identifiable {
         return false
     }
 
+    @discardableResult
+    func focusTerminal() -> Bool {
+        terminalContainer?.focusTerminal() ?? false
+    }
+
     func recordTerminalOutput(_ text: String) {
         let cleaned = sanitizeTerminalText(text)
         guard !cleaned.isEmpty else { return }

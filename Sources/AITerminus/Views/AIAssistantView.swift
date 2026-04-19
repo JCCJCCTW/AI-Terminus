@@ -1280,6 +1280,7 @@ final class MentionTextView: NSTextView {
     var moveMentionSelectionDownHandler: (() -> Bool)?
 
     override func mouseDown(with event: NSEvent) {
+        NSLog("[Focus] MentionTextView mouseDown responder=%@", String(describing: type(of: window?.firstResponder)))
         if let window {
             _ = window.makeFirstResponder(self)
         }
@@ -1289,8 +1290,19 @@ final class MentionTextView: NSTextView {
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
         if accepted {
+            AppState.shared.isAIInputActive = true
             needsDisplay = true
             displayIfNeeded()
+            NSLog("[Focus] MentionTextView becomeFirstResponder accepted=%@", accepted.description)
+        }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted {
+            AppState.shared.isAIInputActive = false
+            NSLog("[Focus] MentionTextView resignFirstResponder accepted=%@", accepted.description)
         }
         return accepted
     }

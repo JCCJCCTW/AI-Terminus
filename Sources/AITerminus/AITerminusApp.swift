@@ -4,17 +4,25 @@ import SwiftTerm
 
 extension NSEvent: @retroactive @unchecked Sendable {}
 
+private func appFocusLog(_ message: String) {
+    NSLog("[Focus] %@", message)
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
+    private var mouseLogMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SessionTerminalView.installResignFirstResponderOverride()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         setupKeyEventMonitor()
+        setupMouseLogMonitor()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        if let m = mouseLogMonitor { NSEvent.removeMonitor(m) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -122,6 +130,90 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AppState.shared.moveFocusedSession(direction)
         return true
     }
+
+    private func setupMouseLogMonitor() {
+        mouseLogMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { event in
+            MainActor.assumeIsolated {
+                AppDelegate.routeMouseSelection(event)
+                AppDelegate.logMouseHitPath(event)
+            }
+            return event
+        }
+    }
+
+    @MainActor
+    private static func routeMouseSelection(_ event: NSEvent) {
+        guard !AppState.shared.isSessionDragModeEnabled,
+              let window = event.window ?? NSApp.keyWindow
+        else { return }
+
+        if shouldBypassMouseSessionRouting(in: window, event: event) {
+            appFocusLog("mouseRoute skippedForTextInput")
+            return
+        }
+
+        let point = event.locationInWindow
+        guard let session = AppState.shared.session(atWindowPoint: point) else { return }
+
+        if AppState.shared.focusedSessionId != session.id {
+            AppState.shared.focusedSessionId = session.id
+            appFocusLog("mouseRoute selected session=\(session.id.uuidString) point={x:\(Int(point.x)), y:\(Int(point.y))}")
+        }
+
+        let accepted = session.focusTerminal()
+        appFocusLog("mouseRoute focusResult session=\(session.id.uuidString) accepted=\(accepted)")
+    }
+
+    @MainActor
+    private static func shouldBypassMouseSessionRouting(in window: NSWindow, event: NSEvent) -> Bool {
+        guard let contentView = window.contentView else { return false }
+        let point = contentView.convert(event.locationInWindow, from: nil)
+
+        var current: NSView? = contentView.hitTest(point)
+        while let view = current {
+            if view is MentionTextView ||
+                view is NSTextView ||
+                view is NSTextField ||
+                view is NSScrollView ||
+                view is NSClipView {
+                return true
+            }
+            current = view.superview
+        }
+
+        return false
+    }
+
+    @MainActor
+    private static func logMouseHitPath(_ event: NSEvent) {
+        guard let window = event.window ?? NSApp.keyWindow,
+              let contentView = window.contentView else { return }
+
+        let point = contentView.convert(event.locationInWindow, from: nil)
+        let hitView = contentView.hitTest(point)
+
+        var chain: [String] = []
+        var current: NSView? = hitView
+        while let view = current {
+            if let container = view as? TerminalViewContainer {
+                chain.append("TerminalViewContainer(\(container.sessionID?.uuidString ?? "nil"))")
+            } else {
+                chain.append(String(describing: type(of: view)))
+            }
+            current = view.superview
+        }
+
+        NSLog(
+            "[Focus] mouseHit point={x:%d,y:%d} hit=%@ chain=%@",
+            Int(point.x),
+            Int(point.y),
+            hitView.map { String(describing: type(of: $0)) } ?? "nil",
+            chain.joined(separator: " -> ")
+        )
+    }
+
 }
 
 @main

@@ -33,10 +33,12 @@ class AppState: ObservableObject {
         }
     }
     @Published var showDragModeKeyboardAlert: Bool = false
+    @Published var isAIInputActive: Bool = false
     @Published var aiConfig: AIConfig = AIConfig()
     @Published var language: AppLanguage = .traditionalChinese {
         didSet { L10n.setCurrentLanguage(language) }
     }
+    private var sessionWindowFrames: [UUID: CGRect] = [:]
 
     private let hostsKey   = "saved_hosts"
     private let aiCfgKey   = "ai_config"
@@ -83,13 +85,17 @@ class AppState: ObservableObject {
         let session = SSHSession(host: host)
         sessions.append(session)
         currentPage = (sessions.count - 1) / 9
-        focusedSessionId = session.id
+        activateSession(session)
     }
 
     func closeSession(_ session: SSHSession) {
         sessions.removeAll { $0.id == session.id }
         if focusedSessionId == session.id {
-            focusedSessionId = sessions.last?.id
+            if let nextSession = sessions.last {
+                activateSession(nextSession)
+            } else {
+                focusedSessionId = nil
+            }
         }
         let maxPage = max(0, (sessions.count - 1) / 9)
         if currentPage > maxPage { currentPage = maxPage }
@@ -117,7 +123,29 @@ class AppState: ObservableObject {
 
         let destinationIndex = sourceIndex + offset
         sessions.swapAt(sourceIndex, destinationIndex)
+        activateSession(session)
+    }
+
+    func activateSession(_ session: SSHSession) {
         focusedSessionId = session.id
+        _ = session.focusTerminal()
+    }
+
+    func updateSessionWindowFrame(_ frame: CGRect?, for sessionID: UUID) {
+        if let frame, !frame.isEmpty {
+            sessionWindowFrames[sessionID] = frame
+        } else {
+            sessionWindowFrames.removeValue(forKey: sessionID)
+        }
+    }
+
+    func session(atWindowPoint point: CGPoint) -> SSHSession? {
+        let containingIDs = sessionWindowFrames.compactMap { sessionID, frame in
+            frame.contains(point) ? sessionID : nil
+        }
+
+        guard !containingIDs.isEmpty else { return nil }
+        return sessions.first(where: { containingIDs.contains($0.id) })
     }
 
     var focusedSession: SSHSession? {
@@ -188,7 +216,7 @@ class AppState: ObservableObject {
         while (0..<rows).contains(nextRow), (0..<cols).contains(nextCol) {
             let nextIndex = nextRow * cols + nextCol
             if let targetSession = slots[nextIndex] {
-                focusedSessionId = targetSession.id
+                activateSession(targetSession)
                 return
             }
             nextRow += delta.row
