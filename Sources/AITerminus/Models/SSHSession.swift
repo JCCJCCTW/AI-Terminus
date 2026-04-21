@@ -74,7 +74,12 @@ class SSHSession: ObservableObject, Identifiable {
     let id: UUID = UUID()
     let host: SSHHost
 
-    @Published var status: ConnectionStatus = .connecting
+    @Published var status: ConnectionStatus = .connecting {
+        didSet {
+            guard oldValue != status else { return }
+            onStatusChange?()
+        }
+    }
     @Published var title: String
     @Published private(set) var transcript: String = ""
     @Published private(set) var transcriptRevision: Int = 0
@@ -82,6 +87,7 @@ class SSHSession: ObservableObject, Identifiable {
     // Strong references keep the terminal host and SSH process alive across page switches.
     var terminalContainer: TerminalViewContainer?
     var terminalView: LocalProcessTerminalView?
+    var onStatusChange: (() -> Void)?
     private var didAutoSubmitStoredPassword = false
     private var promptDetectionBuffer = ""
     private let transcriptLimit = 16_000
@@ -169,6 +175,13 @@ class SSHSession: ObservableObject, Identifiable {
         terminalContainer?.focusTerminal() ?? false
     }
 
+    func terminate() {
+        terminalView?.terminate()
+        terminalContainer?.terminalView?.terminate()
+        terminalView = nil
+        terminalContainer = nil
+    }
+
     func recordTerminalOutput(_ text: String) {
         let cleaned = sanitizeTerminalText(text)
         guard !cleaned.isEmpty else { return }
@@ -178,6 +191,7 @@ class SSHSession: ObservableObject, Identifiable {
             promptDetectionBuffer = String(promptDetectionBuffer.suffix(promptDetectionLimit))
         }
 
+        updateConnectionStatusIfNeeded(for: cleaned)
         appendTranscript(cleaned)
         autoSubmitStoredPasswordIfNeeded()
     }
@@ -206,6 +220,47 @@ class SSHSession: ObservableObject, Identifiable {
         guard hasPasswordPrompt else { return }
         didAutoSubmitStoredPassword = true
         _ = sendText(host.password + "\n")
+    }
+
+    private func updateConnectionStatusIfNeeded(for text: String) {
+        guard status == .connecting else { return }
+
+        let normalized = text.lowercased()
+        if containsConnectionFailure(in: normalized) {
+            status = .failed
+            return
+        }
+
+        if host.isLocalClient || containsConnectedPrompt(in: text) || normalized.contains("last login") {
+            status = .connected
+        }
+    }
+
+    private func containsConnectionFailure(in text: String) -> Bool {
+        let patterns = [
+            "permission denied",
+            "connection refused",
+            "operation timed out",
+            "connection timed out",
+            "no route to host",
+            "could not resolve hostname",
+            "connection closed by remote host",
+            "connection reset by peer",
+            "host key verification failed"
+        ]
+        return patterns.contains { text.contains($0) }
+    }
+
+    private func containsConnectedPrompt(in text: String) -> Bool {
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .suffix(3)
+
+        return lines.contains { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return false }
+            return line.hasSuffix("$") || line.hasSuffix("#") || line.hasSuffix("%") || line.hasSuffix(">")
+        }
     }
 
     private func appendTranscript(_ text: String) {

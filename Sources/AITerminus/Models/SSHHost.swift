@@ -1,6 +1,8 @@
 import Foundation
 
 struct SSHHost: Identifiable, Codable, Equatable, Hashable {
+    static let localClientID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+
     var id: UUID
     var name: String
     var hostname: String
@@ -58,6 +60,28 @@ struct SSHHost: Identifiable, Codable, Equatable, Hashable {
     }
 
     var connectionLabel: String {
-        port == 22 ? "\(username)@\(hostname)" : "\(username)@\(hostname):\(port)"
+        if isLocalClient {
+            return localizedAppText("這台 Mac", "This Mac")
+        }
+        return port == 22 ? "\(username)@\(hostname)" : "\(username)@\(hostname):\(port)"
+    }
+
+    var isLocalClient: Bool {
+        id == Self.localClientID
+    }
+
+    static var localClient: SSHHost {
+        SSHHost(
+            id: localClientID,
+            name: "Client",
+            hostname: "localhost",
+            port: 0,
+            username: NSUserName(),
+            authMethod: .agent,
+            password: "",
+            privateKeyPath: "",
+            notes: localizedAppText("本機終端機", "Local terminal"),
+            group: ""
+        )
     }
 }

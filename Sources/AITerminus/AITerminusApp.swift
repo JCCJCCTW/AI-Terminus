@@ -4,25 +4,28 @@ import SwiftTerm
 
 extension NSEvent: @retroactive @unchecked Sendable {}
 
-private func appFocusLog(_ message: String) {
-    NSLog("[Focus] %@", message)
+private let isAppFocusLoggingEnabled = false
+
+private func appFocusLog(_ message: @autoclosure () -> String) {
+    guard isAppFocusLoggingEnabled else { return }
+    NSLog("[Focus] %@", message())
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
-    private var mouseLogMonitor: Any?
+    private var mouseSelectionMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         SessionTerminalView.installResignFirstResponderOverride()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         setupKeyEventMonitor()
-        setupMouseLogMonitor()
+        setupMouseSelectionMonitor()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
-        if let m = mouseLogMonitor { NSEvent.removeMonitor(m) }
+        if let m = mouseSelectionMonitor { NSEvent.removeMonitor(m) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -131,13 +134,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    private func setupMouseLogMonitor() {
-        mouseLogMonitor = NSEvent.addLocalMonitorForEvents(
+    private func setupMouseSelectionMonitor() {
+        mouseSelectionMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { event in
             MainActor.assumeIsolated {
                 AppDelegate.routeMouseSelection(event)
-                AppDelegate.logMouseHitPath(event)
             }
             return event
         }
@@ -186,40 +188,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    @MainActor
-    private static func logMouseHitPath(_ event: NSEvent) {
-        guard let window = event.window ?? NSApp.keyWindow,
-              let contentView = window.contentView else { return }
-
-        let point = contentView.convert(event.locationInWindow, from: nil)
-        let hitView = contentView.hitTest(point)
-
-        var chain: [String] = []
-        var current: NSView? = hitView
-        while let view = current {
-            if let container = view as? TerminalViewContainer {
-                chain.append("TerminalViewContainer(\(container.sessionID?.uuidString ?? "nil"))")
-            } else {
-                chain.append(String(describing: type(of: view)))
-            }
-            current = view.superview
-        }
-
-        NSLog(
-            "[Focus] mouseHit point={x:%d,y:%d} hit=%@ chain=%@",
-            Int(point.x),
-            Int(point.y),
-            hitView.map { String(describing: type(of: $0)) } ?? "nil",
-            chain.joined(separator: " -> ")
-        )
-    }
-
 }
 
 @main
 struct AITerminusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState.shared
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         WindowGroup {
@@ -255,9 +230,16 @@ struct AITerminusApp: App {
                 Button(appState.t("顯示 / 隱藏 AI 面板", "Show / Hide AI Panel")) { appState.showAIPanel.toggle() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
             }
+
+            CommandGroup(replacing: .appSettings) {
+                Button(appState.t("設定…", "Settings…")) {
+                    openWindow(id: "app-settings")
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+            }
         }
 
-        Settings {
+        Window(appState.t("設定", "Settings"), id: "app-settings") {
             SettingsView().environmentObject(appState)
         }
     }
@@ -265,21 +247,24 @@ struct AITerminusApp: App {
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
-    @State private var draftConfig = AIConfig()
-    @State private var draftLanguage: AppLanguage = .traditionalChinese
 
     var body: some View {
-        AISettingsView(config: $draftConfig, language: $draftLanguage) {
-            appState.aiConfig = draftConfig
-            appState.language = draftLanguage
+        AppSettingsView(
+            aiConfig: $appState.aiConfig,
+            language: $appState.language,
+            terminalAppearance: $appState.terminalAppearance,
+            onSave: {
+                appState.saveAIConfig()
+                appState.saveTerminalAppearance()
+            },
+            onCancel: {},
+            showsActions: false
+        )
+        .onChange(of: appState.aiConfig) { _ in
             appState.saveAIConfig()
-        } onCancel: {
-            draftConfig = appState.aiConfig
-            draftLanguage = appState.language
         }
-        .onAppear {
-            draftConfig = appState.aiConfig
-            draftLanguage = appState.language
+        .onChange(of: appState.terminalAppearance) { _ in
+            appState.saveTerminalAppearance()
         }
     }
 }
