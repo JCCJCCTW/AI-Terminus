@@ -21,7 +21,6 @@ class AppState: ObservableObject {
     @Published private(set) var focusedSessionChangeToken: UInt64 = 0
     @Published private(set) var lastFocusedSessionId: UUID?
     @Published var showAIPanel: Bool = true
-    @Published var showAISettingsSheet: Bool = false
     @Published var isSessionDragModeEnabled: Bool = false {
         didSet {
             if isSessionDragModeEnabled {
@@ -34,7 +33,9 @@ class AppState: ObservableObject {
     }
     @Published var showDragModeKeyboardAlert: Bool = false
     @Published var isAIInputActive: Bool = false
+    @Published private(set) var sessionStatusChangeToken: UInt64 = 0
     @Published var aiConfig: AIConfig = AIConfig()
+    @Published var terminalAppearance: TerminalAppearance = TerminalAppearance()
     @Published var language: AppLanguage = .traditionalChinese {
         didSet { L10n.setCurrentLanguage(language) }
     }
@@ -42,10 +43,12 @@ class AppState: ObservableObject {
 
     private let hostsKey   = "saved_hosts"
     private let aiCfgKey   = "ai_config"
+    private let terminalAppearanceKey = "terminal_appearance"
 
     init() {
         loadHosts()
         loadAIConfig()
+        loadTerminalAppearance()
         loadLanguage()
     }
 
@@ -82,13 +85,26 @@ class AppState: ObservableObject {
 
     func connect(to host: SSHHost) {
         selectedHostId = host.id
-        let session = SSHSession(host: host)
+        let session = makeSession(for: host)
         sessions.append(session)
         currentPage = (sessions.count - 1) / 9
         activateSession(session)
     }
 
+    func reconnectSession(_ session: SSHSession) {
+        guard let index = sessions.firstIndex(where: { $0.id == session.id }) else { return }
+
+        let replacement = makeSession(for: session.host)
+        session.onStatusChange = nil
+        session.terminate()
+        sessions[index] = replacement
+        currentPage = index / 9
+        activateSession(replacement)
+    }
+
     func closeSession(_ session: SSHSession) {
+        session.onStatusChange = nil
+        session.terminate()
         sessions.removeAll { $0.id == session.id }
         if focusedSessionId == session.id {
             if let nextSession = sessions.last {
@@ -252,11 +268,24 @@ class AppState: ObservableObject {
         }
     }
 
+    func saveTerminalAppearance() {
+        if let data = try? JSONEncoder().encode(terminalAppearance) {
+            UserDefaults.standard.set(data, forKey: terminalAppearanceKey)
+        }
+    }
+
     private func loadAIConfig() {
         guard let data = UserDefaults.standard.data(forKey: aiCfgKey),
               let cfg  = try? JSONDecoder().decode(AIConfig.self, from: data)
         else { return }
         aiConfig = cfg
+    }
+
+    private func loadTerminalAppearance() {
+        guard let data = UserDefaults.standard.data(forKey: terminalAppearanceKey),
+              let appearance = try? JSONDecoder().decode(TerminalAppearance.self, from: data)
+        else { return }
+        terminalAppearance = appearance
     }
 
     func t(_ zh: String, _ en: String) -> String {
@@ -280,5 +309,15 @@ class AppState: ObservableObject {
 
     private func loadLanguage() {
         language = L10n.currentLanguage()
+    }
+
+    private func makeSession(for host: SSHHost) -> SSHSession {
+        let session = SSHSession(host: host)
+        session.onStatusChange = { [weak self] in
+            Task { @MainActor in
+                self?.sessionStatusChangeToken &+= 1
+            }
+        }
+        return session
     }
 }

@@ -4,9 +4,11 @@ import AppKit
 import UniformTypeIdentifiers
 
 private let sessionDragPayloadPrefix = "aiterminus-session:"
+private let isFocusLoggingEnabled = false
 
-private func focusLog(_ message: String) {
-    NSLog("[Focus] %@", message)
+private func focusLog(_ message: @autoclosure () -> String) {
+    guard isFocusLoggingEnabled else { return }
+    NSLog("[Focus] %@", message())
 }
 
 private func responderName(_ responder: NSResponder?) -> String {
@@ -109,8 +111,6 @@ struct SessionFrameReporter: NSViewRepresentable {
 
     func updateNSView(_ nsView: SessionFrameTrackingView, context: Context) {
         nsView.sessionID = sessionID
-        nsView.needsLayout = true
-        nsView.layoutSubtreeIfNeeded()
     }
 }
 
@@ -162,9 +162,12 @@ class TerminalViewContainer: NSView {
             super.rightMouseDown(with: event)
             return
         }
-        focusAndForward(event) { tv, forwardedEvent in
-            tv.rightMouseDown(with: forwardedEvent)
+        if let sessionID, AppState.shared.focusedSessionId != sessionID {
+            AppState.shared.focusedSessionId = sessionID
+            focusLog("rightMouseDown selected session=\(sessionID.uuidString)")
         }
+        _ = focusTerminal()
+        super.rightMouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -173,6 +176,10 @@ class TerminalViewContainer: NSView {
 
     override func mouseUp(with event: NSEvent) {
         terminalView?.mouseUp(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        terminalView?.scrollWheel(with: event)
     }
 
     // Called whenever the container is resized — keeps the terminal filling bounds.
@@ -203,6 +210,10 @@ class TerminalViewContainer: NSView {
         tv.autoresizingMask = [.width, .height]
         addSubview(tv)
         refreshTerminalLayout()
+    }
+
+    func applyAppearance(_ appearance: TerminalAppearance) {
+        layer?.backgroundColor = appearance.palette.background.cgColor
     }
 
     @discardableResult
@@ -261,6 +272,7 @@ class TerminalViewContainer: NSView {
 // NSViewRepresentable that reuses an existing LocalProcessTerminalView
 // across page switches, keeping the SSH process alive.
 struct TerminalSessionView: NSViewRepresentable {
+    @EnvironmentObject var appState: AppState
     @ObservedObject var session: SSHSession
 
     func makeCoordinator() -> Coordinator { Coordinator(session: session) }
@@ -268,6 +280,7 @@ struct TerminalSessionView: NSViewRepresentable {
     func makeNSView(context: Context) -> TerminalViewContainer {
         if let existingContainer = session.terminalContainer {
             existingContainer.sessionID = session.id
+            existingContainer.applyAppearance(appState.terminalAppearance)
             if let terminalView = session.terminalView, existingContainer.terminalView !== terminalView {
                 existingContainer.attach(terminalView)
             }
@@ -276,21 +289,17 @@ struct TerminalSessionView: NSViewRepresentable {
 
         let container = TerminalViewContainer(frame: .zero)
         container.sessionID = session.id
+        container.applyAppearance(appState.terminalAppearance)
 
         if let existing = session.terminalView {
             container.attach(existing)
         } else {
-            let tv = makeTerminalView(coordinator: context.coordinator)
+            let tv = makeTerminalView(coordinator: context.coordinator, appearance: appState.terminalAppearance)
             container.attach(tv)
             // Set terminalView synchronously — it is not @Published so this is safe.
             // NSViewRepresentable.makeNSView is called on the main thread.
             MainActor.assumeIsolated {
                 session.terminalView = tv
-            }
-            // Defer the @Published status change to the next runloop pass to avoid
-            // "Publishing changes from within view updates" warnings.
-            Task { @MainActor in
-                session.status = .connected
             }
         }
 
@@ -302,34 +311,51 @@ struct TerminalSessionView: NSViewRepresentable {
 
     func updateNSView(_ nsView: TerminalViewContainer, context: Context) {
         nsView.sessionID = session.id
+        nsView.applyAppearance(appState.terminalAppearance)
         MainActor.assumeIsolated {
             if session.terminalContainer !== nsView {
                 session.terminalContainer = nsView
             }
         }
         if let tv = session.terminalView, nsView.terminalView !== tv {
+            applyAppearance(appState.terminalAppearance, to: tv)
             nsView.attach(tv)
         } else {
+            if let tv = session.terminalView {
+                applyAppearance(appState.terminalAppearance, to: tv)
+            }
             nsView.needsLayout = true
             nsView.layoutSubtreeIfNeeded()
         }
     }
 
-    private func makeTerminalView(coordinator: Coordinator) -> LocalProcessTerminalView {
+    private func makeTerminalView(coordinator: Coordinator, appearance: TerminalAppearance) -> LocalProcessTerminalView {
         let tv = SessionTerminalView(frame: .zero)
-        tv.nativeBackgroundColor = NSColor(calibratedRed: 0.08, green: 0.08, blue: 0.1, alpha: 1)
-        tv.nativeForegroundColor = NSColor(calibratedRed: 0.9,  green: 0.9,  blue: 0.9,  alpha: 1)
         tv.processDelegate = coordinator
         tv.session = session
+        applyAppearance(appearance, to: tv)
 
-        var args: [String] = ["-o", "ServerAliveInterval=30"]
-        if session.host.port != 22 { args += ["-p", "\(session.host.port)"] }
-        if session.host.authMethod == .privateKey, !session.host.privateKeyPath.isEmpty {
-            args += ["-i", session.host.privateKeyPath]
+        if session.host.isLocalClient {
+            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            tv.startProcess(executable: shell, args: ["-l"])
+        } else {
+            var args: [String] = ["-o", "ServerAliveInterval=30"]
+            if session.host.port != 22 { args += ["-p", "\(session.host.port)"] }
+            if session.host.authMethod == .privateKey, !session.host.privateKeyPath.isEmpty {
+                args += ["-i", session.host.privateKeyPath]
+            }
+            args.append("\(session.host.username)@\(session.host.hostname)")
+            tv.startProcess(executable: "/usr/bin/ssh", args: args)
         }
-        args.append("\(session.host.username)@\(session.host.hostname)")
-        tv.startProcess(executable: "/usr/bin/ssh", args: args)
         return tv
+    }
+
+    private func applyAppearance(_ appearance: TerminalAppearance, to terminalView: LocalProcessTerminalView) {
+        let palette = appearance.palette
+        terminalView.nativeBackgroundColor = palette.background
+        terminalView.nativeForegroundColor = palette.foreground
+        terminalView.font = appearance.makeFont()
+        terminalView.caretColor = palette.cursor
     }
 
     // MARK: - Coordinator (LocalProcessTerminalViewDelegate)
@@ -339,7 +365,14 @@ struct TerminalSessionView: NSViewRepresentable {
         init(session: SSHSession) { self.session = session }
 
         func processTerminated(source: TerminalView, exitCode: Int32?) {
-            Task { @MainActor in self.session?.status = .disconnected }
+            Task { @MainActor in
+                guard let session = self.session else { return }
+                if session.status == .connecting, let exitCode, exitCode != 0 {
+                    session.status = .failed
+                } else {
+                    session.status = .disconnected
+                }
+            }
         }
 
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
@@ -420,6 +453,7 @@ struct SessionCell: View {
             Button(appState.t("往後移", "Move Later")) { appState.moveSession(session, offset: 1) }
                 .disabled(!appState.canMoveSession(session, offset: 1))
             Divider()
+            Button(appState.t("重新連線", "Reconnect")) { appState.reconnectSession(session) }
             Button(appState.t("關閉此 Session", "Close This Session")) { appState.closeSession(session) }
         }
         .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -438,7 +472,10 @@ struct SessionCell: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(dropBorderColor, lineWidth: isDropTarget ? 3 : (isFocused ? 2 : 1))
+                .stroke(
+                    dropBorderColor,
+                    lineWidth: isDropTarget ? 3 : (appState.isSessionDragModeEnabled ? 2 : (isFocused ? 2 : 1))
+                )
         )
     }
 
@@ -457,7 +494,13 @@ struct SessionCell: View {
     }
 
     private var dropBorderColor: SwiftUI.Color {
-        isDropTarget ? SwiftUI.Color.accentColor : (isFocused ? SwiftUI.Color.accentColor : SwiftUI.Color.gray.opacity(0.3))
+        if isDropTarget {
+            return SwiftUI.Color.accentColor
+        }
+        if appState.isSessionDragModeEnabled {
+            return SwiftUI.Color.red.opacity(0.9)
+        }
+        return isFocused ? SwiftUI.Color.accentColor : SwiftUI.Color.gray.opacity(0.3)
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {

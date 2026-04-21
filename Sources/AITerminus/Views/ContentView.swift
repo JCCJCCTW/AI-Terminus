@@ -2,8 +2,6 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
-    @State private var draftAIConfig = AIConfig()
-    @State private var draftLanguage: AppLanguage = .traditionalChinese
     @State private var aiPanelResetToken = UUID()
     @State private var aiSubsystemFailureMessage: String?
 
@@ -16,23 +14,6 @@ struct ContentView: View {
             // Center: session grid + tab bar
             SessionGridView()
                 .frame(minWidth: 400)
-                .overlay {
-                    if appState.isSessionDragModeEnabled {
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.red.opacity(0.9), lineWidth: 4)
-                            .padding(4)
-                            .overlay(alignment: .top) {
-                                Text(appState.t("拖曳模式", "Dragging Mode"))
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.red)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(.regularMaterial)
-                                    .clipShape(Capsule())
-                                    .padding(.top, 6)
-                            }
-                    }
-                }
 
             // Right: AI assistant panel
             if appState.showAIPanel {
@@ -69,22 +50,6 @@ struct ContentView: View {
                     )
                 }
                 .help(appState.showAIPanel ? appState.t("隱藏 AI 助理", "Hide AI Assistant") : appState.t("顯示 AI 助理", "Show AI Assistant"))
-            }
-        }
-        .sheet(isPresented: $appState.showAISettingsSheet) {
-            AISettingsView(config: $draftAIConfig, language: $draftLanguage) {
-                appState.aiConfig = draftAIConfig
-                appState.language = draftLanguage
-                appState.saveAIConfig()
-                appState.showAISettingsSheet = false
-            } onCancel: {
-                appState.showAISettingsSheet = false
-            }
-        }
-        .onChange(of: appState.showAISettingsSheet) { show in
-            if show {
-                draftAIConfig = appState.aiConfig
-                draftLanguage = appState.language
             }
         }
         .alert(appState.t("提醒", "Notice"), isPresented: $appState.showDragModeKeyboardAlert) {

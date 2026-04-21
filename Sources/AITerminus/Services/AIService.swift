@@ -64,7 +64,7 @@ enum AISessionControlMode: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-struct AIConfig: Codable {
+struct AIConfig: Codable, Equatable {
     var provider: AIProvider = .anthropic
     var anthropicKey: String  = ""
     var anthropicModel: String = "claude-sonnet-4-6"
@@ -126,7 +126,7 @@ struct AIService {
         messages: [ChatMessage], config: AIConfig, system: String
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { cont in
-            Task {
+            let task = Task {
                 do {
                     guard let url = URL(string: "https://api.anthropic.com/v1/messages") else { throw URLError(.badURL) }
                     var req = URLRequest(url: url)
@@ -154,6 +154,7 @@ struct AIService {
                     cont.finish()
                 } catch { cont.finish(throwing: error) }
             }
+            cont.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -174,7 +175,7 @@ struct AIService {
         messages: [ChatMessage], config: AIConfig, system: String
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { cont in
-            Task {
+            let task = Task {
                 do {
                     guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else { throw URLError(.badURL) }
                     var req = URLRequest(url: url)
@@ -202,6 +203,7 @@ struct AIService {
                     cont.finish()
                 } catch { cont.finish(throwing: error) }
             }
+            cont.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -222,7 +224,7 @@ struct AIService {
         messages: [ChatMessage], config: AIConfig, system: String
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { cont in
-            Task {
+            let task = Task {
                 do {
                     let model = config.geminiModel
                     let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(model):streamGenerateContent?alt=sse&key=\(config.geminiKey)"
@@ -252,6 +254,7 @@ struct AIService {
                     cont.finish()
                 } catch { cont.finish(throwing: error) }
             }
+            cont.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -273,7 +276,7 @@ struct AIService {
         messages: [ChatMessage], config: AIConfig, system: String
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { cont in
-            Task {
+            let task = Task {
                 do {
                     let base = config.ollamaBaseURL.hasSuffix("/")
                         ? config.ollamaBaseURL : config.ollamaBaseURL + "/"
@@ -302,6 +305,7 @@ struct AIService {
                     cont.finish()
                 } catch { cont.finish(throwing: error) }
             }
+            cont.onTermination = { _ in task.cancel() }
         }
     }
 

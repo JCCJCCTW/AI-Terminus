@@ -4,6 +4,9 @@ import AppKit
 struct AIAssistantView: View {
     private static let confirmedCommandMarker = "\u{200B}"
     private static let subsystemFailureDomain = "AIAssistantSubsystem"
+    private static let streamFlushInterval: Duration = .milliseconds(80)
+    private static let streamFlushChunkThreshold = 384
+    private static let messageHistoryLimit = 40
 
     struct SessionMentionOption: Identifiable, Equatable {
         let id: UUID
@@ -52,7 +55,18 @@ struct AIAssistantView: View {
         let transcript: String
     }
 
+    private struct PreparedSendRequest {
+        let requestID: UUID
+        let assistantID: UUID
+        let sendMessages: [ChatMessage]
+        let config: AIConfig
+        let mentionedSessions: [String: UUID]
+        let allowsSessionAutomation: Bool
+        let systemPrompt: String
+    }
+
     @EnvironmentObject var appState: AppState
+    @Environment(\.openWindow) private var openWindow
     @State private var messages: [ChatMessage] = []
     @State private var inputText = ""
     @State private var isLoading = false
@@ -123,18 +137,13 @@ struct AIAssistantView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if messages.isEmpty {
-                            VStack(spacing: 8) {
-                                Image(systemName: "sparkles").font(.system(size: 28))
-                                    .foregroundStyle(.purple.opacity(0.4))
-                                Text(appState.t("詢問 AI 助理\nSSH 指令或系統問題", "Ask the AI assistant\nabout SSH commands or systems"))
-                                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                                    .multilineTextAlignment(.center)
-                            }
-                            .frame(maxWidth: .infinity).padding(.top, 30)
+                            emptyStateView
                         }
-                        ForEach(messages) { msg in
-                            MessageBubble(message: msg) { sendToTerminal($0) }
-                                .id(msg.id)
+                        ForEach(stableMessages) { msg in
+                            stableMessageBubble(for: msg)
+                        }
+                        if let streamingMessage {
+                            streamingMessageBubble(for: streamingMessage)
                         }
                         if isLoading {
                             HStack(spacing: 6) {
@@ -164,7 +173,7 @@ struct AIAssistantView: View {
             // Input
             VStack(spacing: 6) {
                 if !appState.aiConfig.isReady {
-                    Button { appState.showAISettingsSheet = true } label: {
+                    Button { openWindow(id: "app-settings") } label: {
                         Text(appState.aiConfig.notReadyMessage)
                             .font(.system(size: 11)).foregroundStyle(.orange)
                     }
@@ -286,6 +295,43 @@ struct AIAssistantView: View {
         }
     }
 
+    private var emptyStateText: String {
+        appState.t(
+            "詢問 AI 助理\nSSH 指令或系統問題",
+            "Ask the AI assistant\nabout SSH commands or systems"
+        )
+    }
+
+    private var emptyStateView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 28))
+                .foregroundStyle(.purple.opacity(0.4))
+            Text(emptyStateText)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 30)
+    }
+
+    @ViewBuilder
+    private func stableMessageBubble(for message: ChatMessage) -> some View {
+        MessageBubble(message: message, isTextSelectionEnabled: true) { content in
+            sendToTerminal(content)
+        }
+        .id(message.id)
+    }
+
+    @ViewBuilder
+    private func streamingMessageBubble(for message: ChatMessage) -> some View {
+        MessageBubble(message: message, isTextSelectionEnabled: false) { content in
+            sendToTerminal(content)
+        }
+        .id(message.id)
+    }
+
     var targetSession: SSHSession? {
         guard let selectedSessionId else { return nil }
         return appState.sessions.first { $0.id == selectedSessionId }
@@ -294,6 +340,23 @@ struct AIAssistantView: View {
     private var canSend: Bool {
         !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !isLoading && appState.aiConfig.isReady
+    }
+
+    private var activeStreamingMessageID: UUID? {
+        guard isLoading, let lastMessage = messages.last, lastMessage.role == "assistant" else {
+            return nil
+        }
+        return lastMessage.id
+    }
+
+    private var stableMessages: [ChatMessage] {
+        guard let activeStreamingMessageID else { return messages }
+        return messages.filter { $0.id != activeStreamingMessageID }
+    }
+
+    private var streamingMessage: ChatMessage? {
+        guard let activeStreamingMessageID else { return nil }
+        return messages.first(where: { $0.id == activeStreamingMessageID })
     }
 
     private var sessionMentionOptions: [SessionMentionOption] {
@@ -415,30 +478,64 @@ struct AIAssistantView: View {
         }
     }
 
-    @MainActor
     private func sendMessage(requestID: UUID) async {
+        guard let preparedRequest = await MainActor.run(body: { prepareSendRequest(requestID: requestID) }) else { return }
+
         do {
-            let rawText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let text = sanitizedUserInput(rawText)
-            guard !text.isEmpty, appState.aiConfig.isReady else { return }
-            inputText = ""
-            completionQuery = nil
-            completionTrigger = nil
-            currentCompletionRange = nil
-            errorMessage = nil
-
-            messages.append(ChatMessage(role: "user", content: text))
-            messages.append(ChatMessage(role: "assistant", content: ""))
-            guard let assistantID = messages.last?.id else {
-                isLoading = false
-                return
+            let assistantText = try await streamAssistantResponse(for: preparedRequest)
+            guard await MainActor.run(body: { activeRequestID == requestID }) else { throw CancellationError() }
+            if preparedRequest.allowsSessionAutomation {
+                await handleAssistantAutomation(
+                    for: assistantText,
+                    messageID: preparedRequest.assistantID,
+                    mentionedSessions: preparedRequest.mentionedSessions
+                )
             }
-            isLoading = true
+        } catch is CancellationError {
+            // Keep any partial assistant text and stop silently.
+        } catch {
+            await MainActor.run {
+                guard activeRequestID == requestID else { return }
+                if isIsolatableSubsystemFailure(error) {
+                    isolateSubsystem(with: error)
+                } else {
+                    removeMessage(id: preparedRequest.assistantID)
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
 
-            let sendMessages = messages
-                .dropLast()
-                .filter { $0.role == "user" || $0.role == "assistant" }
-            let cfg = appState.aiConfig
+        await MainActor.run {
+            if activeRequestID == requestID {
+                isLoading = false
+                currentTask = nil
+            }
+        }
+    }
+
+    @MainActor
+    private func prepareSendRequest(requestID: UUID) -> PreparedSendRequest? {
+        let rawText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = sanitizedUserInput(rawText)
+        guard !text.isEmpty, appState.aiConfig.isReady else { return nil }
+        inputText = ""
+        completionQuery = nil
+        completionTrigger = nil
+        currentCompletionRange = nil
+        errorMessage = nil
+
+        messages.append(ChatMessage(role: "user", content: text))
+        messages.append(ChatMessage(role: "assistant", content: ""))
+        trimMessageHistoryIfNeeded()
+        guard let assistantID = messages.last?.id else {
+            isLoading = false
+            return nil
+        }
+        isLoading = true
+
+        let sendMessages = messages
+            .dropLast()
+            .filter { $0.role == "user" || $0.role == "assistant" }
         let mentionedSessions = mentionedSessionMap(in: text)
         let allowsSessionAutomation = containsAutomationDirective(in: rawText)
         let selectedSnapshot = makeSessionSnapshot(for: selectedSessionId)
@@ -453,37 +550,55 @@ struct AIAssistantView: View {
             allowsSessionAutomation: allowsSessionAutomation
         )
 
-            let stream = AIService.streamChat(messages: sendMessages, config: cfg, systemPrompt: systemPrompt)
-            for try await chunk in stream {
-                guard activeRequestID == requestID else { throw CancellationError() }
-                appendAssistantChunk(chunk, to: assistantID)
-            }
-            guard activeRequestID == requestID else { throw CancellationError() }
-            if allowsSessionAutomation, let assistantText = messageContent(for: assistantID) {
-                await handleAssistantAutomation(
-                    for: assistantText,
-                    messageID: assistantID,
-                    mentionedSessions: mentionedSessions
-                )
-            }
-        } catch is CancellationError {
-            // Keep any partial assistant text and stop silently.
-        } catch {
-            if activeRequestID == requestID {
-                if isIsolatableSubsystemFailure(error) {
-                    isolateSubsystem(with: error)
-                } else {
-                    if let assistantID = messages.last(where: { $0.role == "assistant" })?.id {
-                        removeMessage(id: assistantID)
-                    }
-                    errorMessage = error.localizedDescription
+        return PreparedSendRequest(
+            requestID: requestID,
+            assistantID: assistantID,
+            sendMessages: sendMessages,
+            config: appState.aiConfig,
+            mentionedSessions: mentionedSessions,
+            allowsSessionAutomation: allowsSessionAutomation,
+            systemPrompt: systemPrompt
+        )
+    }
+
+    private func streamAssistantResponse(for preparedRequest: PreparedSendRequest) async throws -> String {
+        let stream = AIService.streamChat(
+            messages: preparedRequest.sendMessages,
+            config: preparedRequest.config,
+            systemPrompt: preparedRequest.systemPrompt
+        )
+
+        var bufferedChunk = ""
+        var fullResponse = ""
+        let clock = ContinuousClock()
+        var lastFlushAt = clock.now
+
+        for try await chunk in stream {
+            guard await MainActor.run(body: { activeRequestID == preparedRequest.requestID }) else { throw CancellationError() }
+
+            bufferedChunk += chunk
+            fullResponse += chunk
+
+            let shouldFlush = bufferedChunk.count >= Self.streamFlushChunkThreshold ||
+                lastFlushAt.duration(to: clock.now) >= Self.streamFlushInterval
+
+            if shouldFlush {
+                let chunkToFlush = bufferedChunk
+                bufferedChunk.removeAll(keepingCapacity: true)
+                lastFlushAt = clock.now
+                await MainActor.run {
+                    appendAssistantChunk(chunkToFlush, to: preparedRequest.assistantID)
                 }
             }
         }
-        if activeRequestID == requestID {
-            isLoading = false
-            currentTask = nil
+
+        if !bufferedChunk.isEmpty {
+            await MainActor.run {
+                appendAssistantChunk(bufferedChunk, to: preparedRequest.assistantID)
+            }
         }
+
+        return fullResponse
     }
 
     private func buildSystemPrompt(
@@ -708,6 +823,13 @@ struct AIAssistantView: View {
     private func replaceMessageContent(id: UUID, with content: String) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[index].content = content
+    }
+
+    @MainActor
+    private func trimMessageHistoryIfNeeded() {
+        let overflow = messages.count - Self.messageHistoryLimit
+        guard overflow > 0 else { return }
+        messages.removeFirst(overflow)
     }
 
     private func displaySummary(for action: SSHSession.AIControlAction, session: SSHSession) -> String {
@@ -1008,6 +1130,7 @@ struct SessionSelectorView: View {
 
 struct MessageBubble: View {
     let message: ChatMessage
+    let isTextSelectionEnabled: Bool
     let onSendToTerminal: (String) -> Void
     var isUser: Bool { message.role == "user" }
     var isSystem: Bool { message.role == "system" }
@@ -1016,8 +1139,7 @@ struct MessageBubble: View {
         HStack(alignment: .top) {
             if isUser { Spacer(minLength: 32) }
             VStack(alignment: bubbleAlignment, spacing: 4) {
-                Text(message.content.isEmpty ? "▋" : message.content)
-                    .font(.system(size: 13)).textSelection(.enabled)
+                bubbleText
                     .padding(.horizontal, 10).padding(.vertical, 8)
                     .background(bubbleColor)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -1030,6 +1152,17 @@ struct MessageBubble: View {
             }
             .frame(maxWidth: isSystem ? .infinity : 250, alignment: bubbleFrameAlignment)
             if !isUser { Spacer(minLength: isSystem ? 0 : 32) }
+        }
+    }
+
+    @ViewBuilder
+    private var bubbleText: some View {
+        let text = Text(message.content.isEmpty ? "▋" : message.content)
+            .font(.system(size: 13))
+        if isTextSelectionEnabled {
+            text.textSelection(.enabled)
+        } else {
+            text
         }
     }
 
@@ -1353,85 +1486,99 @@ struct AISettingsView: View {
     @Binding var language: AppLanguage
     let onSave: () -> Void
     let onCancel: () -> Void
+    var showsChrome: Bool = true
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(appState.t("AI 助理設定", "AI Settings")).font(.title2).fontWeight(.semibold)
-                Spacer()
-            }
-            .padding(20)
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    ProviderSection(title: appState.t("語言", "Language")) {
-                        LabeledRow(label: appState.t("介面語言", "UI Language")) {
-                            Picker("", selection: $language) {
-                                ForEach(AppLanguage.allCases) { language in
-                                    Text(language.label).tag(language)
-                                }
-                            }
-                            .labelsHidden()
-                        }
-                    }
-
-                    Divider()
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(appState.t("AI 提供者", "AI Provider")).font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary).textCase(.uppercase)
-                        Picker("", selection: $config.provider) {
-                            ForEach(AIProvider.allCases) { p in Text(p.rawValue).tag(p) }
-                        }
-                        .pickerStyle(.radioGroup).labelsHidden()
-                    }
-                    Divider()
-                    switch config.provider {
-                    case .openai:
-                        ProviderSection(title: "OpenAI / ChatGPT") {
-                            SecretField(label: "API Key", placeholder: "sk-...", value: $config.openaiKey)
-                            ModelNameField(label: appState.t("模型", "Model"), placeholder: "gpt-4o", value: $config.openaiModel)
-                            HStack(alignment: .top, spacing: 0) {
-                                Text(appState.t("登入方式", "Sign In"))
-                                    .frame(width: 90, alignment: .trailing)
-                                    .foregroundStyle(.secondary)
-                                Text(appState.t("目前 OpenAI 官方公開文件僅明確提供 API Key 呼叫 API；ChatGPT OAuth 公開流程未提供給一般第三方桌面 app 直接串接。", "OpenAI's public API documentation currently supports API key authentication. A public ChatGPT OAuth flow for direct third-party desktop app integration is not available."))
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.leading, 12)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                    case .anthropic:
-                        ProviderSection(title: "Anthropic / Claude") {
-                            SecretField(label: "API Key", placeholder: "sk-ant-...", value: $config.anthropicKey)
-                            ModelNameField(label: appState.t("模型", "Model"), placeholder: "claude-sonnet-4-6", value: $config.anthropicModel)
-                        }
-                    case .gemini:
-                        ProviderSection(title: "Google Gemini / AI Studio") {
-                            SecretField(label: "API Key", placeholder: "AIza...", value: $config.geminiKey)
-                            ModelNameField(label: appState.t("模型", "Model"), placeholder: "gemini-2.0-flash", value: $config.geminiModel)
-                        }
-                    case .ollama:
-                        ProviderSection(title: appState.t("Ollama（本機）", "Ollama (Local)")) {
-                            LabeledRow(label: appState.t("服務位址", "Base URL")) { TextField("http://localhost:11434", text: $config.ollamaBaseURL) }
-                            LabeledRow(label: appState.t("模型名稱", "Model Name")) { TextField("llama3.2", text: $config.ollamaModel) }
-                        }
-                    }
-
+            if showsChrome {
+                HStack {
+                    Text(appState.t("AI 助理設定", "AI Settings")).font(.title2).fontWeight(.semibold)
+                    Spacer()
                 }
                 .padding(20)
+                Divider()
             }
 
-            Divider()
-            HStack {
-                Spacer()
-                Button(appState.t("取消", "Cancel")) { onCancel() }.keyboardShortcut(.escape)
-                Button(appState.t("儲存", "Save")) { onSave() }.keyboardShortcut(.return).buttonStyle(.borderedProminent)
+            AISettingsForm(config: $config, language: $language)
+
+            if showsChrome {
+                Divider()
+                HStack {
+                    Spacer()
+                    Button(appState.t("取消", "Cancel")) { onCancel() }.keyboardShortcut(.escape)
+                    Button(appState.t("儲存", "Save")) { onSave() }.keyboardShortcut(.return).buttonStyle(.borderedProminent)
+                }
+                .padding(16)
             }
-            .padding(16)
         }
-        .frame(width: 440, height: 420)
+        .frame(width: showsChrome ? 440 : nil, height: showsChrome ? 420 : nil)
+    }
+}
+
+struct AISettingsForm: View {
+    @EnvironmentObject var appState: AppState
+    @Binding var config: AIConfig
+    @Binding var language: AppLanguage
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                ProviderSection(title: appState.t("語言", "Language")) {
+                    LabeledRow(label: appState.t("介面語言", "UI Language")) {
+                        Picker("", selection: $language) {
+                            ForEach(AppLanguage.allCases) { language in
+                                Text(language.label).tag(language)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+                }
+
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(appState.t("AI 提供者", "AI Provider")).font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary).textCase(.uppercase)
+                    Picker("", selection: $config.provider) {
+                        ForEach(AIProvider.allCases) { p in Text(p.rawValue).tag(p) }
+                    }
+                    .pickerStyle(.radioGroup).labelsHidden()
+                }
+                Divider()
+                switch config.provider {
+                case .openai:
+                    ProviderSection(title: "OpenAI / ChatGPT") {
+                        SecretField(label: "API Key", placeholder: "sk-...", value: $config.openaiKey)
+                        ModelNameField(label: appState.t("模型", "Model"), placeholder: "gpt-4o", value: $config.openaiModel)
+                        HStack(alignment: .top, spacing: 0) {
+                            Text(appState.t("登入方式", "Sign In"))
+                                .frame(width: 90, alignment: .trailing)
+                                .foregroundStyle(.secondary)
+                            Text(appState.t("目前 OpenAI 官方公開文件僅明確提供 API Key 呼叫 API；ChatGPT OAuth 公開流程未提供給一般第三方桌面 app 直接串接。", "OpenAI's public API documentation currently supports API key authentication. A public ChatGPT OAuth flow for direct third-party desktop app integration is not available."))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                case .anthropic:
+                    ProviderSection(title: "Anthropic / Claude") {
+                        SecretField(label: "API Key", placeholder: "sk-ant-...", value: $config.anthropicKey)
+                        ModelNameField(label: appState.t("模型", "Model"), placeholder: "claude-sonnet-4-6", value: $config.anthropicModel)
+                    }
+                case .gemini:
+                    ProviderSection(title: "Google Gemini / AI Studio") {
+                        SecretField(label: "API Key", placeholder: "AIza...", value: $config.geminiKey)
+                        ModelNameField(label: appState.t("模型", "Model"), placeholder: "gemini-2.0-flash", value: $config.geminiModel)
+                    }
+                case .ollama:
+                    ProviderSection(title: appState.t("Ollama（本機）", "Ollama (Local)")) {
+                        LabeledRow(label: appState.t("服務位址", "Base URL")) { TextField("http://localhost:11434", text: $config.ollamaBaseURL) }
+                        LabeledRow(label: appState.t("模型名稱", "Model Name")) { TextField("llama3.2", text: $config.ollamaModel) }
+                    }
+                }
+            }
+            .padding(20)
+        }
     }
 }
 
