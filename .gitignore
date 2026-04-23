@@ -18,3 +18,8 @@ dist/
 # Secrets
 *.env
 secrets.json
+
+# Crash reports
+crash report/
+crash-report/
+*.crash
