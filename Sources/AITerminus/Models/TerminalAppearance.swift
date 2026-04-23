@@ -6,6 +6,10 @@ enum TerminalThemePreset: String, CaseIterable, Codable, Identifiable {
     case solarizedDark
     case paperLight
     case matrix
+    case oceanBlue
+    case dracula
+    case nord
+    case monokai
 
     var id: String { rawValue }
 
@@ -19,6 +23,14 @@ enum TerminalThemePreset: String, CaseIterable, Codable, Identifiable {
             return localizedAppText("紙張淺色", "Paper Light")
         case .matrix:
             return "Matrix"
+        case .oceanBlue:
+            return localizedAppText("海洋藍", "Ocean Blue")
+        case .dracula:
+            return "Dracula"
+        case .nord:
+            return "Nord"
+        case .monokai:
+            return "Monokai"
         }
     }
 
@@ -32,6 +44,14 @@ enum TerminalThemePreset: String, CaseIterable, Codable, Identifiable {
             return localizedAppText("淺底深字，適合白天與文件導向工作。", "Light background with dark text for daytime and document-heavy work.")
         case .matrix:
             return localizedAppText("黑底綠字，偏向監控與操作感。", "Black-and-green styling with a more tactical feel.")
+        case .oceanBlue:
+            return localizedAppText("深藍底色搭配柔和藍字，沉穩專業。", "Deep navy with soft blue text, calm and professional.")
+        case .dracula:
+            return localizedAppText("經典紫色調暗色主題，色彩飽和鮮明。", "Popular purple-toned dark theme with vivid colors.")
+        case .nord:
+            return localizedAppText("北極冷色調，低對比護眼配色。", "Arctic cool tones with low contrast, easy on the eyes.")
+        case .monokai:
+            return localizedAppText("暖色調深色主題，經典編輯器配色。", "Warm dark theme inspired by the classic editor palette.")
         }
     }
 
@@ -64,6 +84,34 @@ enum TerminalThemePreset: String, CaseIterable, Codable, Identifiable {
                 foreground: NSColor(calibratedRed: 0.45, green: 1.00, blue: 0.54, alpha: 1),
                 cursor: NSColor(calibratedRed: 0.74, green: 1.00, blue: 0.76, alpha: 1),
                 selection: NSColor(calibratedRed: 0.08, green: 0.24, blue: 0.10, alpha: 1)
+            )
+        case .oceanBlue:
+            return TerminalPalette(
+                background: NSColor(calibratedRed: 0.06, green: 0.10, blue: 0.18, alpha: 1),
+                foreground: NSColor(calibratedRed: 0.68, green: 0.78, blue: 0.90, alpha: 1),
+                cursor: NSColor(calibratedRed: 0.40, green: 0.72, blue: 0.96, alpha: 1),
+                selection: NSColor(calibratedRed: 0.12, green: 0.20, blue: 0.32, alpha: 1)
+            )
+        case .dracula:
+            return TerminalPalette(
+                background: NSColor(calibratedRed: 0.16, green: 0.16, blue: 0.21, alpha: 1),
+                foreground: NSColor(calibratedRed: 0.97, green: 0.97, blue: 0.95, alpha: 1),
+                cursor: NSColor(calibratedRed: 0.74, green: 0.58, blue: 0.98, alpha: 1),
+                selection: NSColor(calibratedRed: 0.27, green: 0.28, blue: 0.35, alpha: 1)
+            )
+        case .nord:
+            return TerminalPalette(
+                background: NSColor(calibratedRed: 0.18, green: 0.20, blue: 0.25, alpha: 1),
+                foreground: NSColor(calibratedRed: 0.85, green: 0.87, blue: 0.91, alpha: 1),
+                cursor: NSColor(calibratedRed: 0.53, green: 0.75, blue: 0.82, alpha: 1),
+                selection: NSColor(calibratedRed: 0.26, green: 0.30, blue: 0.37, alpha: 1)
+            )
+        case .monokai:
+            return TerminalPalette(
+                background: NSColor(calibratedRed: 0.15, green: 0.16, blue: 0.13, alpha: 1),
+                foreground: NSColor(calibratedRed: 0.97, green: 0.97, blue: 0.95, alpha: 1),
+                cursor: NSColor(calibratedRed: 0.90, green: 0.86, blue: 0.45, alpha: 1),
+                selection: NSColor(calibratedRed: 0.28, green: 0.29, blue: 0.25, alpha: 1)
             )
         }
     }

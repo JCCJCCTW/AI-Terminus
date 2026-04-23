@@ -394,7 +394,7 @@ struct SessionCell: View {
         VStack(spacing: 0) {
             // Header
             HStack(spacing: 6) {
-                Circle()
+                 Circle()
                     .fill(session.status.color)
                     .frame(width: 8, height: 8)
                 Text("S\(sessionNumber)")

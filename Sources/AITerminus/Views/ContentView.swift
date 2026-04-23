@@ -4,6 +4,7 @@ struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @State private var aiPanelResetToken = UUID()
     @State private var aiSubsystemFailureMessage: String?
+    @State private var aiPanelWidth: CGFloat = 300
 
     var body: some View {
         HSplitView {
@@ -33,7 +34,17 @@ struct ContentView: View {
                         .id(aiPanelResetToken)
                     }
                 }
-                .frame(minWidth: 260, idealWidth: 300, maxWidth: 400)
+                .frame(width: aiPanelWidth, alignment: .leading)
+                .frame(minWidth: 260, maxWidth: 400)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.onChange(of: geo.size.width) { newWidth in
+                            if newWidth >= 260 && newWidth <= 400 {
+                                aiPanelWidth = newWidth
+                            }
+                        }
+                    }
+                )
             }
         }
         .frame(minWidth: 900, minHeight: 600)

@@ -122,20 +122,15 @@ struct AIAssistantView: View {
 
             Divider()
 
-            // Session selector
-            SessionSelectorView(
-                sessions: appState.sessions,
-                selectedSessionId: $selectedSessionId,
-                lockControlSession: $lockControlSession,
-                targetSession: targetSession
-            )
+            // Session selector (inlined to ensure SwiftUI reactivity)
+            sessionSelectorContent
 
             Divider()
 
             // Chat messages
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
                         if messages.isEmpty {
                             emptyStateView
                         }
@@ -159,6 +154,7 @@ struct AIAssistantView: View {
                         }
                     }
                     .padding(8)
+                    .textSelection(.enabled)
                 }
                 .onChange(of: messages.count) { _ in
                     if let last = messages.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
@@ -318,7 +314,7 @@ struct AIAssistantView: View {
 
     @ViewBuilder
     private func stableMessageBubble(for message: ChatMessage) -> some View {
-        MessageBubble(message: message, isTextSelectionEnabled: true) { content in
+        MessageBubble(message: message) { content in
             sendToTerminal(content)
         }
         .id(message.id)
@@ -326,10 +322,93 @@ struct AIAssistantView: View {
 
     @ViewBuilder
     private func streamingMessageBubble(for message: ChatMessage) -> some View {
-        MessageBubble(message: message, isTextSelectionEnabled: false) { content in
+        MessageBubble(message: message) { content in
             sendToTerminal(content)
         }
         .id(message.id)
+    }
+
+    // MARK: - Inline Session Selector
+
+    @ViewBuilder
+    private var sessionSelectorContent: some View {
+        let sessions = appState.sessions
+        VStack(spacing: 0) {
+            if sessions.isEmpty {
+                HStack {
+                    Image(systemName: "terminal").foregroundStyle(.tertiary)
+                    Text(appState.t("尚無連線中的 Session", "No active sessions"))
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 12).padding(.bottom, 8)
+            } else {
+                HStack(spacing: 8) {
+                    Text(appState.t("控制 Session", "Control Session"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: sessionPickerBinding) {
+                        ForEach(Array(sessions.enumerated()), id: \.element.id) { i, session in
+                            Text("S\(i + 1) \(session.host.displayTitle)").tag(Optional(session.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    Toggle(appState.t("鎖定控制 Session", "Lock Control Session"), isOn: $lockControlSession)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 11))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+
+                if let session = sessions.first(where: { $0.id == validSelectedSessionId }) {
+                    let num = (sessions.firstIndex(where: { $0.id == session.id }) ?? 0) + 1
+                    HStack(spacing: 6) {
+                        Circle().fill(session.status.color).frame(width: 6, height: 6)
+                        Text("S\(num) — \(session.host.connectionLabel)")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Text(appState.t("AI 會直接模擬輸入到這個 Session", "AI will send input directly to this session"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 12).padding(.bottom, 6)
+                }
+            }
+        }
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+        .onAppear { syncSelectedSession() }
+        .onChange(of: sessions.map(\.id)) { _ in syncSelectedSession() }
+    }
+
+    private var validSelectedSessionId: UUID? {
+        let sessions = appState.sessions
+        if let selectedSessionId, sessions.contains(where: { $0.id == selectedSessionId }) {
+            return selectedSessionId
+        }
+        return sessions.first?.id
+    }
+
+    private var sessionPickerBinding: Binding<UUID?> {
+        Binding(
+            get: { validSelectedSessionId },
+            set: { newValue in
+                let sessions = appState.sessions
+                guard let newValue, sessions.contains(where: { $0.id == newValue }) else {
+                    selectedSessionId = sessions.first?.id
+                    return
+                }
+                selectedSessionId = newValue
+            }
+        )
+    }
+
+    private func syncSelectedSession() {
+        let validId = validSelectedSessionId
+        if selectedSessionId != validId {
+            selectedSessionId = validId
+        }
     }
 
     var targetSession: SSHSession? {
@@ -574,7 +653,8 @@ struct AIAssistantView: View {
         var lastFlushAt = clock.now
 
         for try await chunk in stream {
-            guard await MainActor.run(body: { activeRequestID == preparedRequest.requestID }) else { throw CancellationError() }
+            // Use lightweight Task cancellation check instead of MainActor hop on every chunk.
+            try Task.checkCancellation()
 
             bufferedChunk += chunk
             fullResponse += chunk
@@ -586,9 +666,12 @@ struct AIAssistantView: View {
                 let chunkToFlush = bufferedChunk
                 bufferedChunk.removeAll(keepingCapacity: true)
                 lastFlushAt = clock.now
-                await MainActor.run {
+                // Only hop to MainActor during flushes (every ~80ms), not every chunk.
+                guard await MainActor.run(body: {
+                    guard activeRequestID == preparedRequest.requestID else { return false }
                     appendAssistantChunk(chunkToFlush, to: preparedRequest.assistantID)
-                }
+                    return true
+                }) else { throw CancellationError() }
             }
         }
 
@@ -1032,105 +1115,10 @@ private extension String {
     }
 }
 
-// MARK: - Session Selector
-
-struct SessionSelectorView: View {
-    @EnvironmentObject var appState: AppState
-    let sessions: [SSHSession]
-    @Binding var selectedSessionId: UUID?
-    @Binding var lockControlSession: Bool
-    let targetSession: SSHSession?
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if sessions.isEmpty {
-                HStack {
-                    Image(systemName: "terminal").foregroundStyle(.tertiary)
-                    Text(appState.t("尚無連線中的 Session", "No active sessions"))
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
-                }
-                .padding(.horizontal, 12).padding(.bottom, 8)
-            } else {
-                HStack(spacing: 8) {
-                    Text(appState.t("控制 Session", "Control Session"))
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Picker("", selection: selectionBinding) {
-                        ForEach(Array(sessions.enumerated()), id: \.element.id) { i, session in
-                            Text("S\(i + 1) \(session.host.displayTitle)").tag(Optional(session.id))
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    Toggle(appState.t("鎖定控制 Session", "Lock Control Session"), isOn: $lockControlSession)
-                        .toggleStyle(.checkbox)
-                        .font(.system(size: 11))
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 8)
-
-                // Active session info
-                if let session = targetSession {
-                    let num = (sessions.firstIndex(where: { $0.id == session.id }) ?? 0) + 1
-                    HStack(spacing: 6) {
-                        Circle().fill(session.status.color).frame(width: 6, height: 6)
-                        Text("S\(num) — \(session.host.connectionLabel)")
-                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                        Spacer()
-                        Text(appState.t("AI 會直接模擬輸入到這個 Session", "AI will send input directly to this session"))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.horizontal, 12).padding(.bottom, 6)
-                }
-            }
-        }
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
-        .onAppear {
-            syncSelectedSessionIfNeeded()
-        }
-        .onChange(of: sessions.map(\.id)) { _ in
-            syncSelectedSessionIfNeeded()
-        }
-    }
-
-    private var validSelectedSessionId: UUID? {
-        if let selectedSessionId, sessions.contains(where: { $0.id == selectedSessionId }) {
-            return selectedSessionId
-        }
-        return sessions.first?.id
-    }
-
-    private var selectionBinding: Binding<UUID?> {
-        Binding(
-            get: {
-                validSelectedSessionId
-            },
-            set: { newValue in
-                guard let newValue, sessions.contains(where: { $0.id == newValue }) else {
-                    selectedSessionId = sessions.first?.id
-                    return
-                }
-                selectedSessionId = newValue
-            }
-        )
-    }
-
-    private func syncSelectedSessionIfNeeded() {
-        let validId = validSelectedSessionId
-        if selectedSessionId != validId {
-            selectedSessionId = validId
-        }
-    }
-}
-
 // MARK: - Message Bubble
 
 struct MessageBubble: View {
     let message: ChatMessage
-    let isTextSelectionEnabled: Bool
     let onSendToTerminal: (String) -> Void
     var isUser: Bool { message.role == "user" }
     var isSystem: Bool { message.role == "system" }
@@ -1139,10 +1127,7 @@ struct MessageBubble: View {
         HStack(alignment: .top) {
             if isUser { Spacer(minLength: 32) }
             VStack(alignment: bubbleAlignment, spacing: 4) {
-                bubbleText
-                    .padding(.horizontal, 10).padding(.vertical, 8)
-                    .background(bubbleColor)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                bubbleContent
                 if !isUser && !isSystem && !message.content.isEmpty {
                     Button { onSendToTerminal(message.content) } label: {
                         Label("發送到 Session", systemImage: "terminal").font(.system(size: 10))
@@ -1156,14 +1141,15 @@ struct MessageBubble: View {
     }
 
     @ViewBuilder
-    private var bubbleText: some View {
-        let text = Text(message.content.isEmpty ? "▋" : message.content)
+    private var bubbleContent: some View {
+        // .textSelection(.enabled) is set on the parent VStack — it provides
+        // native drag-to-select, Cmd+C, and right-click Copy/Select All.
+        // Do NOT add .contextMenu here — it overrides the native selection menu.
+        Text(message.content.isEmpty ? "▋" : message.content)
             .font(.system(size: 13))
-        if isTextSelectionEnabled {
-            text.textSelection(.enabled)
-        } else {
-            text
-        }
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            .background(bubbleColor)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private var bubbleAlignment: HorizontalAlignment {
@@ -1519,6 +1505,11 @@ struct AISettingsForm: View {
     @EnvironmentObject var appState: AppState
     @Binding var config: AIConfig
     @Binding var language: AppLanguage
+    @State private var chatGPTLoginStatus: String? = {
+        guard let email = UserDefaults.standard.string(forKey: "chatgpt_email"),
+              UserDefaults.standard.bool(forKey: "chatgpt_logged_in") else { return nil }
+        return localizedAppText("已登入：\(email)", "Signed in: \(email)")
+    }()
 
     var body: some View {
         ScrollView {
@@ -1549,15 +1540,72 @@ struct AISettingsForm: View {
                     ProviderSection(title: "OpenAI / ChatGPT") {
                         SecretField(label: "API Key", placeholder: "sk-...", value: $config.openaiKey)
                         ModelNameField(label: appState.t("模型", "Model"), placeholder: "gpt-4o", value: $config.openaiModel)
+
+                        Divider()
+
                         HStack(alignment: .top, spacing: 0) {
-                            Text(appState.t("登入方式", "Sign In"))
+                            Text(appState.t("網頁登入", "Web Login"))
                                 .frame(width: 90, alignment: .trailing)
                                 .foregroundStyle(.secondary)
-                            Text(appState.t("目前 OpenAI 官方公開文件僅明確提供 API Key 呼叫 API；ChatGPT OAuth 公開流程未提供給一般第三方桌面 app 直接串接。", "OpenAI's public API documentation currently supports API key authentication. A public ChatGPT OAuth flow for direct third-party desktop app integration is not available."))
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                                .padding(.leading, 12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 6) {
+                                Button {
+                                    ChatGPTAuthWindow.present(
+                                        onTokenRetrieved: { account in
+                                            UserDefaults.standard.set(true, forKey: "chatgpt_logged_in")
+                                            let emailLabel = account.email ?? "unknown"
+                                            UserDefaults.standard.set(emailLabel, forKey: "chatgpt_email")
+                                            // Cache OAuth tokens for API calls and auto-refresh.
+                                            Task {
+                                                await ChatGPTTokenManager.shared.cacheTokens(
+                                                    access: account.accessToken,
+                                                    refresh: account.refreshToken,
+                                                    expiry: account.expiryDate,
+                                                    accountID: account.accountID
+                                                )
+                                            }
+                                            chatGPTLoginStatus = appState.t(
+                                                "已登入：\(emailLabel)",
+                                                "Signed in: \(emailLabel)"
+                                            )
+                                        },
+                                        onError: { error in
+                                            chatGPTLoginStatus = appState.t(
+                                                "登入失敗：\(error.localizedDescription)",
+                                                "Login failed: \(error.localizedDescription)"
+                                            )
+                                        }
+                                    )
+                                } label: {
+                                    Label(
+                                        appState.t("以 ChatGPT 帳號登入", "Sign in with ChatGPT"),
+                                        systemImage: "globe"
+                                    )
+                                }
+                                if let status = chatGPTLoginStatus {
+                                    HStack(spacing: 8) {
+                                        Text(status)
+                                            .foregroundStyle(status.contains("失敗") || status.contains("failed") ? .red : .green)
+                                        if UserDefaults.standard.bool(forKey: "chatgpt_logged_in") {
+                                            Button {
+                                                Task { await ChatGPTTokenManager.clearTokens() }
+                                                UserDefaults.standard.removeObject(forKey: "chatgpt_logged_in")
+                                                UserDefaults.standard.removeObject(forKey: "chatgpt_email")
+                                                chatGPTLoginStatus = nil
+                                            } label: {
+                                                Text(appState.t("登出", "Sign out"))
+                                                    .font(.system(size: 10))
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .tint(.red)
+                                        }
+                                    }
+                                    .font(.system(size: 11))
+                                }
+                            }
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
                 case .anthropic:

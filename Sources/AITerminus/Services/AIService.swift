@@ -76,10 +76,18 @@ struct AIConfig: Codable, Equatable {
     var ollamaModel: String   = "llama3.2"
     var sessionControlMode: AISessionControlMode = .keys
 
+    var hasOpenAIKey: Bool {
+        !openaiKey.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    var hasChatGPTSession: Bool {
+        UserDefaults.standard.bool(forKey: "chatgpt_logged_in")
+    }
+
     var isReady: Bool {
         switch provider {
         case .anthropic: return !anthropicKey.trimmingCharacters(in: .whitespaces).isEmpty
-        case .openai:    return !openaiKey.trimmingCharacters(in: .whitespaces).isEmpty
+        case .openai:    return hasOpenAIKey || hasChatGPTSession
         case .gemini:    return !geminiKey.trimmingCharacters(in: .whitespaces).isEmpty
         case .ollama:    return !ollamaBaseURL.trimmingCharacters(in: .whitespaces).isEmpty
         }
@@ -97,7 +105,7 @@ struct AIConfig: Codable, Equatable {
     var notReadyMessage: String {
         switch provider {
         case .anthropic: return localizedAppText("請設定 Anthropic API Key", "Please configure an Anthropic API key")
-        case .openai:    return localizedAppText("請設定 OpenAI API Key", "Please configure an OpenAI API key")
+        case .openai:    return localizedAppText("請設定 OpenAI API Key 或以 ChatGPT 帳號登入", "Please configure an OpenAI API key or sign in with ChatGPT")
         case .gemini:    return localizedAppText("請設定 Google AI Studio API Key", "Please configure a Google AI Studio API key")
         case .ollama:    return localizedAppText("請確認 Ollama 服務位址", "Please verify the Ollama base URL")
         }
@@ -114,7 +122,13 @@ struct AIService {
     ) -> AsyncThrowingStream<String, Error> {
         switch config.provider {
         case .anthropic: return streamAnthropic(messages: messages, config: config, system: systemPrompt)
-        case .openai:    return streamOpenAI(messages: messages, config: config, system: systemPrompt)
+        case .openai:
+            // Prefer official API key; fall back to ChatGPT OAuth token.
+            if config.hasOpenAIKey {
+                return streamOpenAI(messages: messages, config: config, system: systemPrompt)
+            } else {
+                return streamOpenAIOAuth(messages: messages, config: config, system: systemPrompt)
+            }
         case .gemini:    return streamGemini(messages: messages, config: config, system: systemPrompt)
         case .ollama:    return streamOllama(messages: messages, config: config, system: systemPrompt)
         }
@@ -249,6 +263,7 @@ struct AIService {
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data: ") else { continue }
                         let json = String(line.dropFirst(6))
+                        if json == "[DONE]" { break }
                         if let text = geminiDelta(json) { cont.yield(text) }
                     }
                     cont.finish()
@@ -320,15 +335,103 @@ struct AIService {
         return text
     }
 
+    // MARK: OpenAI OAuth (ChatGPT subscription via Responses API)
+
+    /// Uses the ChatGPT backend Responses API with a Codex OAuth token.
+    /// This endpoint uses the ChatGPT subscription quota (Plus/Pro),
+    /// unlike /v1/chat/completions which requires separate API billing.
+    private static func streamOpenAIOAuth(
+        messages: [ChatMessage], config: AIConfig, system: String
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { cont in
+            let task = Task {
+                do {
+                    let accessToken: String
+                    do {
+                        accessToken = try await ChatGPTTokenManager.validAccessToken()
+                    } catch {
+                        // Wrap auth errors in AIService domain so they show as
+                        // normal error messages instead of triggering panel isolation.
+                        throw NSError(
+                            domain: "AIService",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: error.localizedDescription]
+                        )
+                    }
+
+                    // ChatGPT OAuth uses the backend-api endpoint (same as Codex CLI).
+                    guard let url = URL(string: "https://chatgpt.com/backend-api/codex/responses") else { throw URLError(.badURL) }
+
+                    // Build input array for the Responses API format.
+                    var input: [[String: String]] = []
+                    for msg in messages {
+                        input.append(["role": msg.role, "content": msg.content])
+                    }
+
+                    var body: [String: Any] = [
+                        "model": config.openaiModel,
+                        "stream": true,
+                        "input": input,
+                        "store": false
+                    ]
+                    // Responses API uses top-level "instructions" instead of a system message.
+                    if !system.isEmpty { body["instructions"] = system }
+
+                    let bodyData = try JSONSerialization.data(withJSONObject: body)
+
+                    var req = URLRequest(url: url)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+                    // ChatGPT backend requires the account ID header (extracted from JWT).
+                    if let accountID = await ChatGPTTokenManager.chatGPTAccountID() {
+                        req.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-ID")
+                    }
+                    req.httpBody = bodyData
+
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    try checkHTTP(resp)
+
+                    // Responses API streaming uses semantic SSE events:
+                    //   event: response.output_text.delta
+                    //   data: {"type":"response.output_text.delta","delta":"text"}
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data: ") else { continue }
+                        let json = String(line.dropFirst(6))
+                        if let delta = responsesAPIDelta(json) {
+                            cont.yield(delta)
+                        }
+                    }
+                    cont.finish()
+                } catch { cont.finish(throwing: error) }
+            }
+            cont.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Extract text delta from a Responses API streaming event.
+    private static func responsesAPIDelta(_ json: String) -> String? {
+        guard
+            let data = json.data(using: .utf8),
+            let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            (obj["type"] as? String) == "response.output_text.delta",
+            let delta = obj["delta"] as? String
+        else { return nil }
+        return delta
+    }
+
     // MARK: Shared
 
     private static func checkHTTP(_ response: URLResponse) throws {
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-        guard http.statusCode == 200 else {
+        guard (200...299).contains(http.statusCode) else {
             throw NSError(
                 domain: "AIService",
                 code: http.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "API 錯誤：HTTP \(http.statusCode)"]
+                userInfo: [NSLocalizedDescriptionKey: localizedAppText(
+                    "API 錯誤：HTTP \(http.statusCode)",
+                    "API error: HTTP \(http.statusCode)"
+                )]
             )
         }
     }
